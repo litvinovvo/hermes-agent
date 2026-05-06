@@ -5,7 +5,35 @@ This transport owns format conversion and normalization — NOT client lifecycle
 streaming, or the _run_codex_stream() call path.
 """
 
+import os
 from typing import Any, Dict, List, Optional
+
+
+_CODEX_WEB_SEARCH_DISABLED = {"", "0", "false", "off", "no", "disabled", "disable", "none"}
+_CODEX_WEB_SEARCH_CACHED = {"cached", "cache"}
+_CODEX_WEB_SEARCH_LIVE = {"1", "true", "on", "yes", "live", "search"}
+
+
+def _codex_native_web_search_tool(mode: Any) -> Optional[Dict[str, Any]]:
+    """Return a native Responses ``web_search`` tool for Codex mode values.
+
+    Matches the open-source Codex CLI shape:
+    - ``cached`` => ``external_web_access: false``
+    - ``live`` / truthy => ``external_web_access: true``
+    - disabled / empty => no tool
+    """
+    if mode is None:
+        return None
+    if isinstance(mode, bool):
+        return {"type": "web_search", "external_web_access": True} if mode else None
+    normalized = str(mode).strip().lower().replace("-", "_")
+    if normalized in _CODEX_WEB_SEARCH_DISABLED:
+        return None
+    if normalized in _CODEX_WEB_SEARCH_CACHED:
+        return {"type": "web_search", "external_web_access": False}
+    if normalized in _CODEX_WEB_SEARCH_LIVE:
+        return {"type": "web_search", "external_web_access": True}
+    return None
 
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall
@@ -89,11 +117,22 @@ class ResponsesApiTransport(ProviderTransport):
         _effort_clamp = {"minimal": "low"}
         reasoning_effort = _effort_clamp.get(reasoning_effort, reasoning_effort)
 
+        responses_tools = _responses_tools(tools)
+        if is_codex_backend:
+            native_web_search_mode = params.get("native_web_search_mode")
+            if native_web_search_mode is None:
+                native_web_search_mode = os.getenv("HERMES_CODEX_WEB_SEARCH")
+            native_web_search_tool = _codex_native_web_search_tool(native_web_search_mode)
+            if native_web_search_tool:
+                responses_tools = list(responses_tools or [])
+                if not any(isinstance(t, dict) and t.get("type") == "web_search" for t in responses_tools):
+                    responses_tools.append(native_web_search_tool)
+
         kwargs = {
             "model": model,
             "instructions": instructions,
             "input": _chat_messages_to_responses_input(payload_messages),
-            "tools": _responses_tools(tools),
+            "tools": responses_tools,
             "tool_choice": "auto",
             "parallel_tool_calls": True,
             "store": False,
@@ -189,6 +228,8 @@ class ResponsesApiTransport(ProviderTransport):
             provider_data["codex_reasoning_items"] = msg.codex_reasoning_items
         if msg and hasattr(msg, "codex_message_items") and msg.codex_message_items:
             provider_data["codex_message_items"] = msg.codex_message_items
+        if msg and hasattr(msg, "codex_web_search_items") and msg.codex_web_search_items:
+            provider_data["codex_web_search_items"] = msg.codex_web_search_items
         if msg and hasattr(msg, "reasoning_details") and msg.reasoning_details:
             provider_data["reasoning_details"] = msg.reasoning_details
 
