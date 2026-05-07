@@ -153,6 +153,7 @@ class TestCodexBuildKwargs:
         assert kw["tools"] == [
             {"type": "web_search", "external_web_access": True}
         ]
+        assert "web_search_call.action.sources" in kw["include"]
 
     def test_codex_native_web_search_cached_adds_responses_tool(self, transport):
         messages = [{"role": "user", "content": "What did we already know?"}]
@@ -167,6 +168,60 @@ class TestCodexBuildKwargs:
         assert kw["tools"] == [
             {"type": "web_search", "external_web_access": False}
         ]
+        assert "web_search_call.action.sources" in kw["include"]
+
+    def test_codex_native_web_search_suppresses_managed_search_function(self, transport):
+        messages = [{"role": "user", "content": "What happened today?"}]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Hermes managed web search",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_extract",
+                    "description": "Hermes managed web extraction",
+                    "parameters": {"type": "object", "properties": {"urls": {"type": "array"}}},
+                },
+            },
+        ]
+
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=tools,
+            is_codex_backend=True,
+            native_web_search_mode="live",
+        )
+
+        assert kw["tools"] == [
+            {
+                "type": "function",
+                "name": "web_extract",
+                "description": "Hermes managed web extraction",
+                "strict": False,
+                "parameters": {"type": "object", "properties": {"urls": {"type": "array"}}},
+            },
+            {"type": "web_search", "external_web_access": True},
+        ]
+
+    def test_codex_native_web_search_merges_sources_include_without_duplicates(self, transport):
+        messages = [{"role": "user", "content": "Search"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            is_codex_backend=True,
+            native_web_search_mode="live",
+            request_overrides={"include": ["custom.include", "web_search_call.action.sources"]},
+        )
+
+        assert kw["include"] == ["custom.include", "web_search_call.action.sources"]
 
     def test_codex_native_web_search_only_for_codex_backend(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
@@ -203,6 +258,19 @@ class TestCodexBuildKwargs:
 
         assert sanitized["tools"] == [
             {"type": "web_search", "external_web_access": False}
+        ]
+
+    def test_preflight_allows_native_web_search_preview_tool(self, transport):
+        sanitized = transport.preflight_kwargs({
+            "model": "gpt-5.4",
+            "instructions": "You are helpful.",
+            "input": [{"role": "user", "content": "Search preview"}],
+            "tools": [{"type": "web_search_preview", "external_web_access": "true"}],
+            "store": False,
+        })
+
+        assert sanitized["tools"] == [
+            {"type": "web_search_preview", "external_web_access": True}
         ]
 
     def test_minimal_effort_clamped(self, transport):

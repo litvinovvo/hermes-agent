@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 
 logger = logging.getLogger(__name__)
+_CODEX_NATIVE_WEB_SEARCH_TOOL_TYPES = {"web_search", "web_search_preview"}
 
 
 # Matches Codex/Harmony tool-call serialization that occasionally leaks into
@@ -638,8 +639,8 @@ def _preflight_codex_api_kwargs(
             if not isinstance(tool, dict):
                 raise ValueError(f"Codex Responses tools[{idx}] must be an object.")
             tool_type = tool.get("type")
-            if tool_type == "web_search":
-                normalized_web_search: Dict[str, Any] = {"type": "web_search"}
+            if tool_type in _CODEX_NATIVE_WEB_SEARCH_TOOL_TYPES:
+                normalized_web_search: Dict[str, Any] = {"type": tool_type}
                 external_web_access = tool.get("external_web_access")
                 if external_web_access is not None:
                     normalized_web_search["external_web_access"] = _codex_bool(external_web_access)

@@ -145,7 +145,7 @@ hermes config set codex.web_search cached    # cached/no-live mode
 hermes config set codex.web_search disabled  # off
 ```
 
-When enabled, Hermes preserves native `web_search_call` response items and citation annotations in session/provider metadata so provider-side search usage is auditable. During streaming, native Codex searches are also surfaced through the normal Hermes tool-progress UI as `web_search`/`web_extract`, so Telegram/TUI users see the same separate search-progress line as they do with Hermes's external web providers. If you prefer a compact end-of-turn summary, gateway runtime footers can optionally include a `search` field, but it is not required for the standard search-call UX.
+When enabled, Hermes requests native web-search source traces, preserves `web_search_call` response items and citation annotations in session/provider metadata, and suppresses Hermes's managed `web_search` function tool to avoid presenting two search tools with the same name. During streaming, native Codex searches are still surfaced through the normal Hermes tool-progress UI as `web_search`/`web_extract`, so Telegram/TUI users see the same separate search-progress line as they do with Hermes's external web providers. If you prefer a compact end-of-turn summary, gateway runtime footers can optionally include a `search` field, but it is not required for the standard search-call UX.
 
 For process-scoped tests, `HERMES_CODEX_WEB_SEARCH` accepts the same values and overrides `codex.web_search` from config.
 :::
