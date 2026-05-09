@@ -384,9 +384,16 @@ class HonchoMemoryProvider(MemoryProvider):
         # Skip under per-session strategy: every Hermes run creates a fresh
         # Honcho session by design, so uploading MEMORY.md/USER.md/SOUL.md to
         # each one would flood the backend with short-lived duplicates instead
-        # of performing a one-time migration.
+        # of performing a one-time migration. Also allow explicit opt-out for
+        # curated-memory setups where legacy local files should not be ingested
+        # verbatim as Honcho observations.
         try:
-            if not session.messages and cfg.session_strategy != "per-session":
+            if not cfg.auto_migrate_local_memory_files:
+                logger.debug(
+                    "Honcho memory file migration skipped: autoMigrateLocalMemoryFiles=false (%s)",
+                    self._session_key,
+                )
+            elif not session.messages and cfg.session_strategy != "per-session":
                 from hermes_constants import get_hermes_home
                 mem_dir = str(get_hermes_home() / "memories")
                 self._manager.migrate_memory_files(self._session_key, mem_dir)

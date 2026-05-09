@@ -3976,6 +3976,11 @@ def _default_spawn(
     # attributed correctly regardless of how the child loads config.
     env["HERMES_PROFILE"] = profile_arg
 
+    # Do not rely on PATH here: the dispatcher normally runs inside the
+    # gateway's systemd user service, whose environment may not include
+    # ~/.local/bin even when interactive shells do.  Re-enter Hermes via
+    # the currently running interpreter/module so kanban workers spawn
+    # from the same checkout/venv as the dispatcher.
     cmd = [
         *_resolve_hermes_argv(),
         "-p", profile_arg,
@@ -4028,8 +4033,8 @@ def _default_spawn(
     except FileNotFoundError:
         log_f.close()
         raise RuntimeError(
-            "`hermes` executable not found on PATH. "
-            "Install Hermes Agent or activate its venv before running the kanban dispatcher."
+            "Unable to start Hermes kanban worker via current Python interpreter. "
+            "Verify the dispatcher is running from a valid Hermes Agent checkout/venv."
         )
     # NOTE: we intentionally do NOT close log_f here — we want Popen's
     # child process to keep writing after this function returns.  The

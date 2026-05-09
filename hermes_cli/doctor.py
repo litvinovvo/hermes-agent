@@ -1448,6 +1448,11 @@ def run_doctor(args):
             }
             if base_url_host_matches(base, "api.kimi.com"):
                 headers["User-Agent"] = "claude-code/0.1.0"
+            # Google AI Studio/Gemini API keys are not Bearer tokens.
+            # The native endpoint expects the key as x-goog-api-key.
+            if base_url_host_matches(url, "generativelanguage.googleapis.com"):
+                headers.pop("Authorization", None)
+                headers["x-goog-api-key"] = key
             r = httpx.get(url, headers=headers, timeout=10)
             if (
                 pname == "Alibaba/DashScope"

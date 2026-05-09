@@ -49,6 +49,14 @@ SUMMARY_PREFIX = (
     "that appears AFTER this summary. The current session state (files, "
     "config, etc.) may reflect work described here — avoid repeating it:"
 )
+CODEX_SUMMARY_PREFIX = (
+    "Another language model started to solve this problem and produced a "
+    "summary of its thinking process. You also have access to the state of "
+    "the tools that were used by that language model. Use this to build on "
+    "the work that has already been done and avoid duplicating work. Here is "
+    "the summary produced by the other language model, use the information in "
+    "this summary to assist with your own analysis:"
+)
 LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
 
 # Minimum tokens for the summary output
@@ -57,6 +65,11 @@ _MIN_SUMMARY_TOKENS = 2000
 _SUMMARY_RATIO = 0.20
 # Absolute ceiling for summary tokens (even on very large context windows)
 _SUMMARY_TOKENS_CEILING = 12_000
+# Codex CLI keeps a verbatim budget of recent user messages alongside the
+# compaction summary. Preserve the same shape for the openai-codex Responses
+# backend so user constraints survive compaction without depending entirely on
+# lossy summarization.
+_CODEX_COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000
 
 # Placeholder used when pruning old tool results
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
@@ -819,6 +832,8 @@ class ContextCompressor(ContextEngine):
         summary_budget = self._compute_summary_budget(turns_to_summarize)
         content_to_summarize = self._serialize_for_summary(turns_to_summarize)
 
+        codex_memento = self._use_codex_memento_compaction()
+
         # Preamble shared by both first-compaction and iterative-update prompts.
         # Keep the wording deliberately plain: Azure/OpenAI-compatible content
         # filters have flagged stronger "injection" / "do not respond" framing.
@@ -924,6 +939,40 @@ Use this exact structure:
 
 {_template_sections}"""
 
+        if codex_memento:
+            if self._previous_summary:
+                prompt = f"""You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
+
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work.
+
+PREVIOUS SUMMARY:
+{self._previous_summary}
+
+NEW TURNS TO INCORPORATE:
+{content_to_summarize}
+
+Update the summary. Preserve still-relevant details from the previous summary and add the new work. Write in the user's language. Never include API keys, tokens, passwords, secrets, credentials, or connection strings; replace them with [REDACTED]."""
+            else:
+                prompt = f"""You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
+
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work.
+Write in the user's language. Never include API keys, tokens, passwords, secrets, credentials, or connection strings; replace them with [REDACTED].
+
+TURNS TO SUMMARIZE:
+{content_to_summarize}"""
+
         # Inject focus topic guidance when the user provides one via /compress <focus>.
         # This goes at the end of the prompt so it takes precedence.
         if focus_topic:
@@ -961,6 +1010,8 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             self._summary_failure_cooldown_until = 0.0
             self._summary_model_fallen_back = False
             self._last_summary_error = None
+            if codex_memento:
+                return self._with_codex_summary_prefix(summary)
             return self._with_summary_prefix(summary)
         except RuntimeError:
             # No provider configured — long cooldown, unlikely to self-resolve
@@ -1072,9 +1123,9 @@ The user has requested that this compaction PRIORITISE preserving all informatio
 
     @staticmethod
     def _strip_summary_prefix(summary: str) -> str:
-        """Return summary body without the current or legacy handoff prefix."""
+        """Return summary body without the current, Codex, or legacy handoff prefix."""
         text = (summary or "").strip()
-        for prefix in (SUMMARY_PREFIX, LEGACY_SUMMARY_PREFIX):
+        for prefix in (SUMMARY_PREFIX, CODEX_SUMMARY_PREFIX, LEGACY_SUMMARY_PREFIX):
             if text.startswith(prefix):
                 return text[len(prefix):].lstrip()
         return text
@@ -1085,10 +1136,79 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         text = cls._strip_summary_prefix(summary)
         return f"{SUMMARY_PREFIX}\n{text}" if text else SUMMARY_PREFIX
 
+    def _use_codex_memento_compaction(self) -> bool:
+        """Return True when we should mirror Codex CLI's memento-style shape."""
+        provider = (self.provider or "").strip().lower().replace("_", "-")
+        return self.api_mode == "codex_responses" and provider in {"openai-codex", "codex"}
+
+    @staticmethod
+    def _strip_any_summary_prefix(summary: str) -> str:
+        """Return a summary body without Hermes, Codex, or legacy prefixes."""
+        text = (summary or "").strip()
+        for prefix in (SUMMARY_PREFIX, CODEX_SUMMARY_PREFIX, LEGACY_SUMMARY_PREFIX):
+            if text.startswith(prefix):
+                return text[len(prefix):].lstrip()
+        return text
+
+    @classmethod
+    def _with_codex_summary_prefix(cls, summary: str) -> str:
+        """Normalize summary text to Codex CLI's compaction handoff prefix."""
+        text = cls._strip_any_summary_prefix(summary)
+        return f"{CODEX_SUMMARY_PREFIX}\n{text}" if text else CODEX_SUMMARY_PREFIX
+
+    @classmethod
+    def _is_context_summary_text(cls, text: str) -> bool:
+        stripped = (text or "").lstrip()
+        return any(
+            stripped.startswith(prefix)
+            for prefix in (SUMMARY_PREFIX, CODEX_SUMMARY_PREFIX, LEGACY_SUMMARY_PREFIX)
+        )
+
+    @classmethod
+    def _select_codex_user_messages(
+        cls,
+        messages: List[Dict[str, Any]],
+        max_tokens: int = _CODEX_COMPACT_USER_MESSAGE_MAX_TOKENS,
+    ) -> List[str]:
+        """Select recent real user messages to retain verbatim, Codex-style.
+
+        Mirrors Codex CLI's `collect_user_messages` + 20k-token reverse
+        selection: keep the newest user utterances from the compacted region,
+        skip prior compaction summaries, and truncate only the oldest selected
+        message if needed to fit the budget.
+        """
+        if max_tokens <= 0:
+            return []
+        selected: List[str] = []
+        remaining = max_tokens
+        for msg in reversed(messages):
+            if msg.get("role") != "user":
+                continue
+            text = _content_text_for_contains(msg.get("content"))
+            if not text.strip() or cls._is_context_summary_text(text):
+                continue
+            text = redact_sensitive_text(text)
+            tokens = max(1, len(text) // _CHARS_PER_TOKEN)
+            if tokens <= remaining:
+                selected.append(text)
+                remaining = max(0, remaining - tokens)
+            else:
+                keep_chars = max(0, remaining * _CHARS_PER_TOKEN)
+                if keep_chars > 0:
+                    selected.append(text[:keep_chars])
+                break
+            if remaining <= 0:
+                break
+        selected.reverse()
+        return selected
+
     @staticmethod
     def _is_context_summary_content(content: Any) -> bool:
         text = _content_text_for_contains(content).lstrip()
-        return text.startswith(SUMMARY_PREFIX) or text.startswith(LEGACY_SUMMARY_PREFIX)
+        return any(
+            text.startswith(prefix)
+            for prefix in (SUMMARY_PREFIX, CODEX_SUMMARY_PREFIX, LEGACY_SUMMARY_PREFIX)
+        )
 
     @classmethod
     def _find_latest_context_summary(
@@ -1443,6 +1563,11 @@ The user has requested that this compaction PRIORITISE preserving all informatio
 
         # Phase 3: Generate structured summary
         summary = self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
+        codex_memento = self._use_codex_memento_compaction()
+        codex_user_messages = (
+            self._select_codex_user_messages(messages[compress_start:compress_end])
+            if codex_memento else []
+        )
 
         # Phase 4: Assemble compressed message list
         compressed = []
@@ -1466,8 +1591,9 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             n_dropped = compress_end - compress_start
             self._last_summary_dropped_count = n_dropped
             self._last_summary_fallback_used = True
+            prefix = CODEX_SUMMARY_PREFIX if codex_memento else SUMMARY_PREFIX
             summary = (
-                f"{SUMMARY_PREFIX}\n"
+                f"{prefix}\n"
                 f"Summary generation was unavailable. {n_dropped} message(s) were "
                 f"removed to free context space but could not be summarized. The removed "
                 f"messages contained earlier work in this session. Continue based on the "
@@ -1475,33 +1601,38 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             )
 
         _merge_summary_into_tail = False
-        last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"
-        first_tail_role = messages[compress_end].get("role", "user") if compress_end < n_messages else "user"
-        # Pick a role that avoids consecutive same-role with both neighbors.
-        # Priority: avoid colliding with head (already committed), then tail.
-        if last_head_role in {"assistant", "tool"}:
+        if codex_memento:
+            for user_text in codex_user_messages:
+                compressed.append({"role": "user", "content": user_text})
             summary_role = "user"
         else:
-            summary_role = "assistant"
-        # If the chosen role collides with the tail AND flipping wouldn't
-        # collide with the head, flip it.
-        if summary_role == first_tail_role:
-            flipped = "assistant" if summary_role == "user" else "user"
-            if flipped != last_head_role:
-                summary_role = flipped
+            last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"
+            first_tail_role = messages[compress_end].get("role", "user") if compress_end < n_messages else "user"
+            # Pick a role that avoids consecutive same-role with both neighbors.
+            # Priority: avoid colliding with head (already committed), then tail.
+            if last_head_role in ("assistant", "tool"):
+                summary_role = "user"
             else:
-                # Both roles would create consecutive same-role messages
-                # (e.g. head=assistant, tail=user — neither role works).
-                # Merge the summary into the first tail message instead
-                # of inserting a standalone message that breaks alternation.
-                _merge_summary_into_tail = True
+                summary_role = "assistant"
+            # If the chosen role collides with the tail AND flipping wouldn't
+            # collide with the head, flip it.
+            if summary_role == first_tail_role:
+                flipped = "assistant" if summary_role == "user" else "user"
+                if flipped != last_head_role:
+                    summary_role = flipped
+                else:
+                    # Both roles would create consecutive same-role messages
+                    # (e.g. head=assistant, tail=user — neither role works).
+                    # Merge the summary into the first tail message instead
+                    # of inserting a standalone message that breaks alternation.
+                    _merge_summary_into_tail = True
 
         # When the summary lands as a standalone role="user" message,
         # weak models read the verbatim "## Active Task" quote of a past
         # user request as fresh input (#11475, #14521). Append the explicit
         # end marker — the same one used in the merge-into-tail path — so
         # the model has a clear "summary above, not new input" signal.
-        if not _merge_summary_into_tail and summary_role == "user":
+        if not _merge_summary_into_tail and summary_role == "user" and not codex_memento:
             summary = (
                 summary
                 + "\n\n--- END OF CONTEXT SUMMARY — "

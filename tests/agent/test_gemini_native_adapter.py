@@ -125,6 +125,36 @@ def test_build_native_request_strips_json_schema_only_fields_from_tool_parameter
     }
 
 
+def test_build_native_request_translates_video_url_data_uri_to_inline_data():
+    from agent.gemini_native_adapter import build_gemini_request
+
+    request = build_gemini_request(
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this video"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": "data:video/mp4;base64,AAEC"},
+                    },
+                ],
+            }
+        ],
+        tools=[],
+        tool_choice=None,
+    )
+
+    parts = request["contents"][0]["parts"]
+    assert parts[0] == {"text": "Describe this video"}
+    assert parts[1] == {
+        "inlineData": {
+            "mimeType": "video/mp4",
+            "data": "AAEC",
+        }
+    }
+
+
 def test_translate_native_response_surfaces_reasoning_and_tool_calls():
     from agent.gemini_native_adapter import translate_gemini_response
 

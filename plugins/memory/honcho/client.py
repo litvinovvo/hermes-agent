@@ -261,6 +261,8 @@ class HonchoClientConfig:
     # Toggles
     enabled: bool = False
     save_messages: bool = True
+    # Whether to auto-upload legacy ~/.hermes/memories/*.md into a new Honcho session.
+    auto_migrate_local_memory_files: bool = True
     # Write frequency: "async" (background thread), "turn" (sync per turn),
     # "session" (flush on session end), or int (every N turns)
     write_frequency: str | int = "async"
@@ -459,6 +461,11 @@ class HonchoClientConfig:
             ),
             enabled=enabled,
             save_messages=save_messages,
+            auto_migrate_local_memory_files=_resolve_bool(
+                host_block.get("autoMigrateLocalMemoryFiles"),
+                raw.get("autoMigrateLocalMemoryFiles"),
+                default=True,
+            ),
             write_frequency=write_frequency,
             context_tokens=_parse_context_tokens(
                 host_block.get("contextTokens"),

@@ -1504,19 +1504,49 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=None)
         
         try:
-            # Format and split message if needed
+            # Format and split message if needed.  Split long replies at the
+            # source-markdown layer first, then format each chunk independently.
+            # Splitting after MarkdownV2 conversion can cut through Telegram
+            # entities (especially inline/pre code) and force a plain-text
+            # fallback, which makes user-visible markdown disappear.
             formatted = self.format_message(content)
-            chunks = self.truncate_message(
-                formatted, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len,
-            )
-            if len(chunks) > 1:
-                # truncate_message appends a raw " (1/2)" suffix. Escape the
-                # MarkdownV2-special parentheses so Telegram doesn't reject the
-                # chunk and fall back to plain text.
-                chunks = [
-                    re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", chunk)
-                    for chunk in chunks
-                ]
+            if utf16_len(formatted) <= self.MAX_MESSAGE_LENGTH:
+                chunks = [formatted]
+            else:
+                raw_chunks = self.truncate_message(
+                    content,
+                    max(
+                        1,
+                        self.MAX_MESSAGE_LENGTH - 900
+                        if self.MAX_MESSAGE_LENGTH > 1000
+                        else self.MAX_MESSAGE_LENGTH - 20,
+                    ),
+                    len_fn=utf16_len,
+                )
+                chunks = []
+                for raw_chunk in raw_chunks:
+                    # truncate_message adds human chunk indicators.  Remove
+                    # them before MarkdownV2 conversion so we can add one
+                    # consistent escaped indicator after all final chunks are
+                    # known (and avoid nested "(1/3) (2/2)" suffixes).
+                    raw_chunk = re.sub(r" \(\d+/\d+\)$", "", raw_chunk)
+                    formatted_chunk = self.format_message(raw_chunk)
+                    formatted_subchunks = self.truncate_message(
+                        formatted_chunk,
+                        max(1, self.MAX_MESSAGE_LENGTH - 40),
+                        len_fn=utf16_len,
+                    )
+                    formatted_subchunks = [
+                        re.sub(r" (?:\\\\)?\(\d+/\d+(?:\\\\)?\)$", "", chunk)
+                        for chunk in formatted_subchunks
+                    ]
+                    chunks.extend(formatted_subchunks)
+                if len(chunks) > 1:
+                    total = len(chunks)
+                    chunks = [
+                        f"{chunk} \\({idx}/{total}\\)"
+                        for idx, chunk in enumerate(chunks, start=1)
+                    ]
             
             message_ids = []
             thread_id = self._metadata_thread_id(metadata)

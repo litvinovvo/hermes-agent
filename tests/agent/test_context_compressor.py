@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX
+from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX, CODEX_SUMMARY_PREFIX
 
 
 @pytest.fixture()
@@ -245,6 +245,63 @@ class TestNonStringContent:
             "api_key": "codex-token",
             "api_mode": "codex_responses",
         }
+
+    def test_openai_codex_uses_codex_compaction_prompt_and_prefix(self):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "compact body"
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="gpt-5.5",
+                provider="openai-codex",
+                api_mode="codex_responses",
+                quiet_mode=True,
+            )
+
+        messages = [
+            {"role": "user", "content": "do something"},
+            {"role": "assistant", "content": "ok"},
+        ]
+        with patch("agent.context_compressor.call_llm", return_value=mock_response) as mock_call:
+            summary = c._generate_summary(messages)
+
+        prompt = mock_call.call_args.kwargs["messages"][0]["content"]
+        assert "You are performing a CONTEXT CHECKPOINT COMPACTION" in prompt
+        assert "Use this exact structure" not in prompt
+        assert summary.startswith(CODEX_SUMMARY_PREFIX)
+        assert "compact body" in summary
+
+    def test_openai_codex_preserves_recent_user_messages_codex_style(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="gpt-5.5",
+                provider="openai-codex",
+                api_mode="codex_responses",
+                protect_first_n=1,
+                protect_last_n=2,
+                quiet_mode=True,
+            )
+        c._generate_summary = MagicMock(return_value=f"{CODEX_SUMMARY_PREFIX}\nsummary")
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old user constraint: keep this verbatim"},
+            {"role": "assistant", "content": "not retained verbatim"},
+            {"role": "user", "content": f"{SUMMARY_PREFIX}\nold summary should be skipped"},
+            {"role": "assistant", "content": "more old work"},
+            {"role": "user", "content": "latest user request"},
+            {"role": "assistant", "content": "latest assistant"},
+        ]
+
+        result = c.compress(messages, current_tokens=90000)
+        contents = [m.get("content") for m in result]
+
+        assert "old user constraint: keep this verbatim" in contents
+        assert f"{SUMMARY_PREFIX}\nold summary should be skipped" not in contents
+        assert any(
+            isinstance(content, str) and content.startswith(CODEX_SUMMARY_PREFIX)
+            for content in contents
+        )
 
 
 class TestSummaryFailureCooldown:
