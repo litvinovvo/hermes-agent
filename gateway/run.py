@@ -6247,12 +6247,15 @@ class GatewayRunner:
         if event.media_urls:
             image_paths = []
             audio_paths = []
+            video_paths = []
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
                 if mtype.startswith("image/") or event.message_type == MessageType.PHOTO:
                     image_paths.append(path)
                 if mtype.startswith("audio/") or event.message_type in (MessageType.VOICE, MessageType.AUDIO):
                     audio_paths.append(path)
+                if mtype.startswith("video/") or event.message_type == MessageType.VIDEO:
+                    video_paths.append(path)
 
             if image_paths:
                 # Decide routing: native (attach pixels) vs text (vision_analyze
@@ -6278,6 +6281,12 @@ class GatewayRunner:
                         message_text,
                         image_paths,
                     )
+
+            if video_paths:
+                message_text = await self._enrich_message_with_video_analysis(
+                    message_text,
+                    video_paths,
+                )
 
             if audio_paths:
                 message_text = await self._enrich_message_with_transcription(
@@ -7152,6 +7161,7 @@ class GatewayRunner:
             _footer_line = ""
             try:
                 from gateway.runtime_footer import build_footer_line as _bfl
+
                 _footer_line = _bfl(
                     user_config=_load_gateway_config(),
                     platform_key=_platform_config_key(source.platform),
@@ -7355,7 +7365,7 @@ class GatewayRunner:
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
             if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
-                await self._send_voice_reply(event, response)
+                await self._send_voice_reply(event, response, footer_line=_footer_line)
 
             # If streaming already delivered the response, extract and
             # deliver any MEDIA: files before returning None.  Streaming
@@ -7381,13 +7391,7 @@ class GatewayRunner:
                 # still surface the runtime metadata on the final reply.
                 if _footer_line:
                     try:
-                        _foot_adapter = self.adapters.get(source.platform)
-                        if _foot_adapter:
-                            await _foot_adapter.send(
-                                source.chat_id,
-                                _footer_line,
-                                metadata=self._thread_metadata_for_source(source, self._reply_anchor_for_event(event)),
-                            )
+                        await self._send_trailing_footer(source, _footer_line)
                     except Exception as _e:
                         logger.debug("trailing footer send failed: %s", _e)
                 return None
@@ -9347,65 +9351,284 @@ class GatewayRunner:
 
         return True
 
-    async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
-        """Generate TTS audio and send as a voice message before the text reply."""
+    def _prepare_auto_tts_speech_source(self, text: str, footer_line: str | None = None) -> str:
+        """Build a speech-friendly source from a visible chat reply.
+
+        Auto-TTS should not simply read the whole rendered answer aloud: final
+        replies often contain command blocks, file paths, MEDIA tags, links, and
+        other visual-only details. Keep prose/status lines and drop technical
+        artifacts before the provider-specific markdown cleaner runs.
+        """
+        speech_source = text or ""
+        if footer_line:
+            stripped_footer = footer_line.strip()
+            stripped_source = speech_source.rstrip()
+            if stripped_footer and stripped_source.endswith(stripped_footer):
+                speech_source = stripped_source[:-len(stripped_footer)].rstrip()
+
+        # Remove fenced code blocks wholesale; they are almost never pleasant or
+        # useful as synthesized speech.
+        speech_source = re.sub(r"```[\s\S]*?```", " ", speech_source)
+
+        skip_headings = {
+            "команды", "команда", "файлы", "файл", "пути", "путь",
+            "ссылки", "ссылка", "код", "логи", "лог",
+            "commands", "command", "files", "file", "paths", "path",
+            "links", "link", "code", "logs", "log",
+        }
+        command_re = re.compile(
+            r"^\s*(?:[$#>]\s*)?"
+            r"(?:python3?|uv|pytest|pip|npm|pnpm|yarn|node|git|gh|hermes|"
+            r"curl|wget|ffmpeg|docker|docker-compose|cd|source|export|sudo|bash|sh)\b",
+            re.IGNORECASE,
+        )
+        path_re = re.compile(r"(?:^|[\s`'\"])(?:~|/|[A-Za-z]:[\\/])[^\s`'\"]+")
+
+        kept_lines: list[str] = []
+        for raw_line in speech_source.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if "MEDIA:" in line or "[[audio_as_voice]]" in line:
+                continue
+            if re.search(r"https?://\S+", line):
+                continue
+
+            heading = line.strip(" -*_#`:").lower()
+            if heading in skip_headings:
+                continue
+
+            without_bullet = re.sub(r"^\s*[-*•]\s+", "", line).strip()
+            if path_re.search(without_bullet):
+                continue
+            if command_re.search(without_bullet):
+                continue
+            if without_bullet.startswith(("```", "~~~")):
+                continue
+
+            kept_lines.append(without_bullet)
+
+        return re.sub(r"\s+", " ", " ".join(kept_lines)).strip()
+
+    def _auto_tts_adaptation_config(self) -> dict:
+        """Return gateway auto-TTS hidden LLM adaptation settings."""
+        cfg = _load_gateway_config()
+        raw = cfg_get(cfg, "tts", "speech_adaptation", default={})
+        if not isinstance(raw, dict):
+            raw = {}
+        return {
+            "enabled": is_truthy_value(raw.get("enabled"), default=False),
+            "max_input_chars": raw.get("max_input_chars", 6000),
+        }
+
+    @staticmethod
+    def _coerce_positive_int(value: Any, default: int) -> int:
+        try:
+            coerced = int(value)
+            return coerced if coerced > 0 else default
+        except (TypeError, ValueError):
+            return default
+
+    async def _adapt_auto_tts_text_for_voice(
+        self,
+        *,
+        visible_reply: str,
+        fallback_tts_text: str,
+    ) -> str:
+        """Optionally rewrite the visible reply into a dedicated speech script.
+
+        The regex/markdown cleanup path is a safe fallback, but it can sound like
+        a visually-edited answer with holes where code/paths were removed.  When
+        enabled, ask the configured auxiliary LLM for a fresh speech-only version
+        that summarizes the useful meaning while omitting visual artifacts.
+        """
+        config = self._auto_tts_adaptation_config()
+        if not config.get("enabled"):
+            return fallback_tts_text
+
+        source_limit = self._coerce_positive_int(config.get("max_input_chars"), 6000)
+        visible_excerpt = (visible_reply or "")[:source_limit]
+        fallback_excerpt = fallback_tts_text or ""
+        if not fallback_excerpt.strip():
+            return fallback_tts_text
+
+        system_prompt = (
+            "You rewrite assistant chat replies into concise speech-only summaries for TTS voice notes. "
+            "The speech text is hidden from the chat UI and will be synthesized aloud. "
+            "Return ONLY the text to speak, with no preface, no markdown, no bullet list, no code, "
+            "no commands, no file paths, no URLs, no MEDIA tags, and no runtime footer. "
+            "Prefer a compact voice summary over a full adapted retelling: keep the outcome, the key facts, "
+            "important caveats, and any immediate next step, while skipping secondary detail that remains visible in chat. "
+            "This is a style direction, not a hard length limit; if a detail is essential for the user to act safely or correctly, include it. "
+            "If the original reply is Russian, write natural Russian. If it is another language, keep that language. "
+            "For Russian OmniVoice-style speech, rewrite numbers, currencies, percentages, decimals, and compact stats "
+            "into natural words instead of raw symbols. You may use at most one simple expressive tag such as "
+            "[sigh], [laughter], [question-ah], [surprise-ah], or [dissatisfaction-hnn] only if it genuinely helps. "
+            "Do not silently truncate mid-thought; long speech can still be split into separate voice chunks after this step."
+        )
+        user_prompt = (
+            "Visible assistant reply:\n"
+            "<<<VISIBLE_REPLY\n"
+            f"{visible_excerpt}\n"
+            "VISIBLE_REPLY\n\n"
+            "Fallback cleaned TTS text (use as semantic hint, not as mandatory wording):\n"
+            "<<<FALLBACK_TTS\n"
+            f"{fallback_excerpt}\n"
+            "FALLBACK_TTS\n\n"
+            "Write the final speech script now."
+        )
+
+        try:
+            from agent.auxiliary_client import call_llm
+            from tools.tts_tool import _strip_markdown_for_tts
+
+            response = await asyncio.to_thread(
+                call_llm,
+                "tts_adaptation",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.35,
+            )
+            content = response.choices[0].message.content
+            if isinstance(content, list):
+                content = " ".join(
+                    str(part.get("text", part)) if isinstance(part, dict) else str(part)
+                    for part in content
+                )
+            adapted = str(content or "").strip().strip('"“”')
+            adapted = re.sub(r"^\s*(?:speech(?: script)?|tts(?: text)?|текст(?: для речи)?):\s*", "", adapted, flags=re.IGNORECASE)
+            adapted_source = self._prepare_auto_tts_speech_source(adapted)
+            adapted_tts = _strip_markdown_for_tts(adapted_source).strip()
+            if adapted_tts:
+                return adapted_tts
+        except Exception as exc:
+            logger.warning("Auto-TTS LLM adaptation failed; using cleaned fallback: %s", exc)
+
+        return fallback_tts_text
+
+    def _split_auto_tts_text(self, text: str, max_chars: int = 560) -> List[str]:
+        """Split gateway auto-TTS text into voice-note chunks.
+
+        Gateway-level /voice tts happens after the model has produced text, so the
+        model cannot split it with multiple text_to_speech calls. Keep chunks
+        bounded while allowing longer Telegram voice bubbles when requested.
+        """
+        chunks: List[str] = []
+        current = ""
+        for part in re.split(r"(?<=[.!?…。！？])\s+|\n+", text):
+            part = part.strip()
+            if not part:
+                continue
+            if len(part) > max_chars:
+                words = part.split()
+                for word in words:
+                    candidate = f"{current} {word}".strip() if current else word
+                    if len(candidate) > max_chars and current:
+                        chunks.append(current)
+                        current = word
+                    else:
+                        current = candidate
+                continue
+            candidate = f"{current} {part}".strip() if current else part
+            if len(candidate) > max_chars and current:
+                chunks.append(current)
+                current = part
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+        return chunks
+
+    async def _send_voice_reply(self, event: MessageEvent, text: str, footer_line: str | None = None) -> None:
+        """Generate TTS audio and send as short voice messages before text."""
         import uuid as _uuid
-        audio_path = None
-        actual_path = None
+        paths_to_cleanup: set[str] = set()
         try:
             from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
 
-            tts_text = _strip_markdown_for_tts(text[:4000])
+            speech_source = self._prepare_auto_tts_speech_source(
+                text,
+                footer_line=footer_line,
+            )
+
+            tts_text = _strip_markdown_for_tts(speech_source)
             if not tts_text:
                 return
 
-            # Use .mp3 extension so edge-tts conversion to opus works correctly.
-            # The TTS tool may convert to .ogg — use file_path from result.
-            audio_path = os.path.join(
-                tempfile.gettempdir(), "hermes_voice",
-                f"tts_reply_{_uuid.uuid4().hex[:12]}.mp3",
+            tts_text = await self._adapt_auto_tts_text_for_voice(
+                visible_reply=text,
+                fallback_tts_text=tts_text,
             )
-            os.makedirs(os.path.dirname(audio_path), exist_ok=True)
+            if not tts_text:
+                return
 
-            result_json = await asyncio.to_thread(
-                text_to_speech_tool, text=tts_text, output_path=audio_path
-            )
-            result = json.loads(result_json)
-
-            # Use the actual file path from result (may differ after opus conversion)
-            actual_path = result.get("file_path", audio_path)
-            if not result.get("success") or not os.path.isfile(actual_path):
-                logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
+            chunks = self._split_auto_tts_text(tts_text)
+            if not chunks:
                 return
 
             adapter = self.adapters.get(event.source.platform)
-
-            # If connected to a voice channel, play there instead of sending a file
             guild_id = self._get_guild_id(event)
-            if (guild_id
-                    and hasattr(adapter, "play_in_voice_channel")
-                    and hasattr(adapter, "is_in_voice_channel")
-                    and adapter.is_in_voice_channel(guild_id)):
-                await adapter.play_in_voice_channel(guild_id, actual_path)
-            elif adapter and hasattr(adapter, "send_voice"):
-                reply_anchor = self._reply_anchor_for_event(event)
-                thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
-                send_kwargs: Dict[str, Any] = {
-                    "chat_id": event.source.chat_id,
-                    "audio_path": actual_path,
-                    "reply_to": reply_anchor,
-                }
-                if thread_meta:
-                    send_kwargs["metadata"] = thread_meta
-                await adapter.send_voice(**send_kwargs)
+
+            for idx, chunk in enumerate(chunks):
+                # Use .mp3 extension so edge-tts conversion to opus works correctly.
+                # The TTS tool may convert to .ogg — use file_path from result.
+                audio_path = os.path.join(
+                    tempfile.gettempdir(), "hermes_voice",
+                    f"tts_reply_{_uuid.uuid4().hex[:12]}.mp3",
+                )
+                paths_to_cleanup.add(audio_path)
+                os.makedirs(os.path.dirname(audio_path), exist_ok=True)
+
+                result_json = await asyncio.to_thread(
+                    text_to_speech_tool, text=chunk, output_path=audio_path
+                )
+                result = json.loads(result_json)
+
+                # Use the actual file path from result (may differ after opus conversion)
+                actual_path = result.get("file_path", audio_path)
+                paths_to_cleanup.add(actual_path)
+                if not result.get("success") or not os.path.isfile(actual_path):
+                    logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
+                    continue
+
+                # If connected to a voice channel, play there instead of sending a file
+                if (guild_id
+                        and hasattr(adapter, "play_in_voice_channel")
+                        and hasattr(adapter, "is_in_voice_channel")
+                        and adapter.is_in_voice_channel(guild_id)):
+                    await adapter.play_in_voice_channel(guild_id, actual_path)
+                elif adapter and hasattr(adapter, "send_voice"):
+                    reply_anchor = self._reply_anchor_for_event(event) if idx == 0 else None
+                    thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
+                    send_kwargs: Dict[str, Any] = {
+                        "chat_id": event.source.chat_id,
+                        "audio_path": actual_path,
+                        "reply_to": reply_anchor,
+                    }
+                    if thread_meta:
+                        send_kwargs["metadata"] = thread_meta
+                    await adapter.send_voice(**send_kwargs)
         except Exception as e:
             logger.warning("Auto voice reply failed: %s", e, exc_info=True)
         finally:
-            for p in {audio_path, actual_path} - {None}:
+            for p in paths_to_cleanup:
                 try:
                     os.unlink(p)
                 except OSError:
                     pass
+
+    async def _send_trailing_footer(self, source, footer_line: str) -> None:
+        """Send a post-stream runtime footer to the same chat/thread as the turn."""
+        if not footer_line:
+            return
+        adapter = self.adapters.get(source.platform)
+        if not adapter:
+            return
+        thread_id = getattr(source, "thread_id", None)
+        metadata = {"thread_id": thread_id} if thread_id else None
+        await adapter.send(source.chat_id, footer_line, metadata=metadata)
 
     async def _deliver_media_from_response(
         self,
@@ -12479,6 +12702,60 @@ class GatewayRunner:
             return prefix
         return user_text
 
+    async def _enrich_message_with_video_analysis(
+        self,
+        user_text: str,
+        video_paths: List[str],
+    ) -> str:
+        """Auto-analyze user-attached videos and prepend the analysis."""
+        from tools.vision_tools import video_analyze_tool
+        from agent.memory_manager import sanitize_context
+
+        analysis_prompt = (
+            "Analyze this user-sent video in detail. Describe what happens over time, "
+            "the first 1-3 seconds, visible text, people/objects, audio-relevant cues if visible, "
+            "editing rhythm, the ending, and any notable context. If it looks like social media "
+            "content, also assess hook strength, clarity, retention, emotion, meme/share potential, "
+            "and concrete improvements."
+        )
+
+        enriched_parts = []
+        for path in video_paths:
+            try:
+                logger.debug("Auto-analyzing user video: %s", path)
+                result_json = await video_analyze_tool(
+                    video_url=path,
+                    user_prompt=analysis_prompt,
+                )
+                result = json.loads(result_json)
+                if result.get("success"):
+                    description = sanitize_context(result.get("analysis", ""))
+                    enriched_parts.append(
+                        f"[The user sent a video~ Here's my video analysis:\n{description}]\n"
+                        f"[If you need a closer look, use video_analyze with "
+                        f"video_url: {path} ~]"
+                    )
+                else:
+                    analysis = sanitize_context(result.get("analysis") or result.get("error") or "")
+                    enriched_parts.append(
+                        f"[The user sent a video saved at: {path}. "
+                        f"Automatic video analysis failed: {analysis}. "
+                        f"You can retry with video_analyze using video_url: {path}]"
+                    )
+            except Exception as e:
+                logger.error("Video auto-analysis error: %s", e, exc_info=True)
+                enriched_parts.append(
+                    f"[The user sent a video saved at: {path}, but automatic analysis failed. "
+                    f"You can retry with video_analyze using video_url: {path}]"
+                )
+
+        if enriched_parts:
+            prefix = "\n\n".join(enriched_parts)
+            if user_text:
+                return f"{prefix}\n\n{user_text}"
+            return prefix
+        return user_text
+
     async def _enrich_message_with_transcription(
         self,
         user_text: str,
@@ -14724,6 +15001,7 @@ class GatewayRunner:
             _last_prompt_toks = 0
             _input_toks = 0
             _output_toks = 0
+            _completion_toks = 0
             _context_length = 0
             _agent = agent_holder[0]
             if _agent and hasattr(_agent, "context_compressor"):
@@ -14731,6 +15009,7 @@ class GatewayRunner:
                 _input_toks = getattr(_agent, "session_prompt_tokens", 0)
                 _output_toks = getattr(_agent, "session_completion_tokens", 0)
                 _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
+                _completion_toks = getattr(_agent.context_compressor, "last_completion_tokens", 0)
             _resolved_model = getattr(_agent, "model", None) if _agent else None
 
             if not final_response:
@@ -14751,6 +15030,7 @@ class GatewayRunner:
                     "last_prompt_tokens": _last_prompt_toks,
                     "input_tokens": _input_toks,
                     "output_tokens": _output_toks,
+                    "completion_tokens": _completion_toks,
                     "model": _resolved_model,
                     "context_length": _context_length,
                 }
@@ -14870,6 +15150,7 @@ class GatewayRunner:
                 "last_prompt_tokens": _last_prompt_toks,
                 "input_tokens": _input_toks,
                 "output_tokens": _output_toks,
+                "completion_tokens": _completion_toks,
                 "model": _resolved_model,
                 "context_length": _context_length,
                 "session_id": effective_session_id,

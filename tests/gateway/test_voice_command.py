@@ -51,7 +51,7 @@ def _ensure_discord_mock():
 
 _ensure_discord_mock()
 
-from gateway.platforms.base import MessageEvent, MessageType, SessionSource
+from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SessionSource
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +402,46 @@ class TestAutoVoiceReply:
         }]
         assert self._call(runner, "all", MessageType.TEXT, agent_messages=messages) is True
 
+    @pytest.mark.asyncio
+    async def test_base_adapter_voice_input_auto_tts_uses_summary_adaptation(self):
+        class _ConcreteAdapter(BasePlatformAdapter):
+            async def connect(self):
+                return True
+
+            async def disconnect(self):
+                return None
+
+            async def send(self, *args, **kwargs):
+                return MagicMock(success=True)
+
+            async def get_chat_info(self, chat_id):
+                return {}
+
+        adapter = object.__new__(_ConcreteAdapter)
+        adapter.platform = SimpleNamespace(value="test")
+        llm_response = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content="Коротко: голос теперь говорит итог и важный следующий шаг, а детали остаются в тексте.")
+            )]
+        )
+
+        with patch("hermes_cli.config.load_config", return_value={
+                "tts": {"speech_adaptation": {"enabled": True, "max_input_chars": 300}}
+             }), \
+             patch("agent.auxiliary_client.call_llm", return_value=llm_response) as mock_call_llm, \
+             patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t):
+            adapted = await adapter._adapt_voice_input_auto_tts_text(
+                visible_reply="Готово. Подробности: `python3 -m pytest ...` и длинный список файлов.",
+                fallback_tts_text="Готово. Подробности: python3 -m pytest и длинный список файлов.",
+            )
+
+        mock_call_llm.assert_called_once()
+        system_prompt = mock_call_llm.call_args.kwargs["messages"][0]["content"]
+        assert "concise speech-only summaries" in system_prompt
+        assert "compact voice summary" in system_prompt
+        assert "not a hard length limit" in system_prompt
+        assert adapted == "Коротко: голос теперь говорит итог и важный следующий шаг, а детали остаются в тексте."
+
 
 # =====================================================================
 # _send_voice_reply
@@ -465,6 +505,166 @@ class TestSendVoiceReply:
         }
 
     @pytest.mark.asyncio
+    async def test_runtime_footer_is_not_sent_to_tts(self, runner):
+        mock_adapter = AsyncMock()
+        mock_adapter.send_voice = AsyncMock()
+        event = _make_event()
+        runner.adapters[event.source.platform] = mock_adapter
+
+        footer = "gpt-5.5 · 0%"
+        captured: list[str] = []
+
+        def fake_tts(text, output_path):
+            captured.append(text)
+            return json.dumps({"success": True, "file_path": "/tmp/test.ogg"})
+
+        with patch("tools.tts_tool.text_to_speech_tool", side_effect=fake_tts), \
+             patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.unlink"), \
+             patch("os.makedirs"):
+            await runner._send_voice_reply(
+                event,
+                f"Привет! Чем займёмся?\n\n{footer}",
+                footer_line=footer,
+            )
+
+        assert captured == ["Привет! Чем займёмся?"]
+        mock_adapter.send_voice.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_auto_tts_uses_speech_friendly_text_not_code_commands_or_paths(self, runner):
+        mock_adapter = AsyncMock()
+        mock_adapter.send_voice = AsyncMock()
+        event = _make_event()
+        runner.adapters[event.source.platform] = mock_adapter
+
+        captured: list[str] = []
+
+        def fake_tts(text, output_path):
+            captured.append(text)
+            return json.dumps({"success": True, "file_path": "/tmp/test.ogg"})
+
+        response = """
+Готово — поправил подсчёт токенов в секунду.
+
+Команды:
+```bash
+python3 -m pytest tests/gateway/test_runtime_footer.py -q
+```
+
+Файлы:
+- `/home/pc_lion/.hermes/hermes-agent/run_agent.py`
+- `/home/pc_lion/.hermes/hermes-agent/gateway/run.py`
+
+Итог: теперь метрика считает только LLM-сервис, а не весь gateway turn.
+"""
+
+        with patch("tools.tts_tool.text_to_speech_tool", side_effect=fake_tts), \
+             patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.unlink"), \
+             patch("os.makedirs"):
+            await runner._send_voice_reply(event, response)
+
+        assert captured == [
+            "Готово — поправил подсчёт токенов в секунду. "
+            "Итог: теперь метрика считает только LLM-сервис, а не весь gateway turn."
+        ]
+        assert "python3" not in captured[0]
+        assert "/home/pc_lion" not in captured[0]
+        mock_adapter.send_voice.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_auto_tts_can_use_hidden_llm_speech_adaptation(self, runner):
+        mock_adapter = AsyncMock()
+        mock_adapter.send_voice = AsyncMock()
+        event = _make_event()
+        runner.adapters[event.source.platform] = mock_adapter
+
+        captured: list[str] = []
+
+        def fake_tts(text, output_path):
+            captured.append(text)
+            return json.dumps({"success": True, "file_path": "/tmp/test.ogg"})
+
+        llm_response = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content="Готово, я включил отдельную голосовую версию ответа: теперь она будет звучать как нормальная речь, а не как текст с вырезанным кодом."
+                )
+            )]
+        )
+
+        with patch("gateway.run._load_gateway_config", return_value={
+                "tts": {"speech_adaptation": {"enabled": True, "max_output_chars": 400}}
+             }), \
+             patch("agent.auxiliary_client.call_llm", return_value=llm_response) as mock_call_llm, \
+             patch("tools.tts_tool.text_to_speech_tool", side_effect=fake_tts), \
+             patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.unlink"), \
+             patch("os.makedirs"):
+            await runner._send_voice_reply(
+                event,
+                "Готово.\nКод: `python3 -m pytest`.\nФайл: `/tmp/x.py`.",
+            )
+
+        mock_call_llm.assert_called_once()
+        system_prompt = mock_call_llm.call_args.kwargs["messages"][0]["content"]
+        assert "concise speech-only summaries" in system_prompt
+        assert "compact voice summary" in system_prompt
+        assert "not a hard length limit" in system_prompt
+        assert "full adapted retelling" in system_prompt
+        assert captured == [
+            "Готово, я включил отдельную голосовую версию ответа: теперь она будет звучать как нормальная речь, а не как текст с вырезанным кодом."
+        ]
+        assert "python3" not in captured[0]
+        assert "/tmp/x.py" not in captured[0]
+        mock_adapter.send_voice.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_auto_tts_adaptation_ignores_output_char_limit(self, runner):
+        mock_adapter = AsyncMock()
+        mock_adapter.send_voice = AsyncMock()
+        event = _make_event()
+        runner.adapters[event.source.platform] = mock_adapter
+
+        captured: list[str] = []
+
+        def fake_tts(text, output_path):
+            captured.append(text)
+            return json.dumps({"success": True, "file_path": "/tmp/test.ogg"})
+
+        llm_response = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content=(
+                        "Первая фраза уже закончена. "
+                        "Вторая фраза специально длинная и не должна попадать в голос как обрубок"
+                    )
+                )
+            )]
+        )
+
+        with patch("gateway.run._load_gateway_config", return_value={
+                "tts": {"speech_adaptation": {"enabled": True, "max_output_chars": 45}}
+             }), \
+             patch("agent.auxiliary_client.call_llm", return_value=llm_response), \
+             patch("tools.tts_tool.text_to_speech_tool", side_effect=fake_tts), \
+             patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.unlink"), \
+             patch("os.makedirs"):
+            await runner._send_voice_reply(event, "Видимый ответ.")
+
+        assert captured == [
+            "Первая фраза уже закончена. "
+            "Вторая фраза специально длинная и не должна попадать в голос как обрубок"
+        ]
+        mock_adapter.send_voice.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_empty_text_after_strip_skips(self, runner):
         event = _make_event()
 
@@ -473,6 +673,35 @@ class TestSendVoiceReply:
             await runner._send_voice_reply(event, "```code only```")
 
         mock_tts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_long_auto_tts_reply_is_split_into_multiple_voice_messages(self, runner):
+        mock_adapter = AsyncMock()
+        mock_adapter.send_voice = AsyncMock()
+        event = _make_event()
+        runner.adapters[event.source.platform] = mock_adapter
+
+        paths = iter([f"/tmp/test-{idx}.ogg" for idx in range(1, 10)])
+
+        def fake_tts(text, output_path):
+            assert len(text) <= 560
+            return json.dumps({"success": True, "file_path": next(paths)})
+
+        sentence = (
+            "Это достаточно подробное предложение про причину сбоя и автогенерацию голоса, "
+            "которое должно оставаться читаемым в отдельном голосовом сообщении. "
+        )
+        long_reply = sentence * 8
+
+        with patch("tools.tts_tool.text_to_speech_tool", side_effect=fake_tts) as mock_tts, \
+             patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
+             patch("os.path.isfile", return_value=True), \
+             patch("os.unlink"), \
+             patch("os.makedirs"):
+            await runner._send_voice_reply(event, long_reply)
+
+        assert mock_tts.call_count >= 2
+        assert mock_adapter.send_voice.call_count == mock_tts.call_count
 
     @pytest.mark.asyncio
     async def test_tts_failure_no_crash(self, runner):

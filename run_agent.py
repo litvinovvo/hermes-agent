@@ -151,7 +151,7 @@ from agent.prompt_builder import (
 )
 from agent.model_metadata import (
     fetch_model_metadata,
-    estimate_tokens_rough, estimate_messages_tokens_rough, estimate_request_tokens_rough,
+    estimate_messages_tokens_rough, estimate_request_tokens_rough,
     get_next_probe_tier, parse_context_limit_from_error,
     parse_available_output_tokens_from_error,
     save_context_length, is_local_endpoint,
@@ -6341,6 +6341,7 @@ class AIAgent:
             if self._interrupt_requested:
                 raise InterruptedError("Agent interrupted before Codex stream retry")
             collected_output_items: list = []
+            completed_response = None
             try:
                 with active_client.responses.stream(**api_kwargs) as stream:
                     for event in stream:
@@ -6378,6 +6379,10 @@ class AIAgent:
                             done_item = getattr(event, "item", None)
                             if done_item is not None:
                                 collected_output_items.append(done_item)
+                        # Preserve the terminal completed response if the SDK's
+                        # later get_final_response() drops metadata such as usage.
+                        elif event_type == "response.completed":
+                            completed_response = getattr(event, "response", None)
                         # Log non-completed terminal events for diagnostics
                         elif event_type in ("response.incomplete", "response.failed"):
                             resp_obj = getattr(event, "response", None)
@@ -6391,6 +6396,16 @@ class AIAgent:
                                 self._client_log_context(),
                             )
                     final_response = stream.get_final_response()
+                    # Some Responses streaming backends (notably ChatGPT Codex)
+                    # emit usage on the terminal response.completed event, while
+                    # the SDK object returned by get_final_response() may omit it.
+                    if (
+                        final_response is not None
+                        and not getattr(final_response, "usage", None)
+                        and completed_response is not None
+                        and getattr(completed_response, "usage", None)
+                    ):
+                        final_response.usage = getattr(completed_response, "usage", None)
                     # PATCH: ChatGPT Codex backend streams valid output items
                     # but get_final_response() can return an empty output list.
                     # Backfill from collected items or synthesize from deltas.
@@ -11822,6 +11837,7 @@ class AIAgent:
             api_kwargs = None  # Guard against UnboundLocalError in except handler
 
             while retry_count < max_retries:
+                api_service_start_time = None
                 # ── Nous Portal rate limit guard ──────────────────────
                 # If another session already recorded that Nous is rate-
                 # limited, skip the API call entirely.  Each attempt
@@ -11944,6 +11960,7 @@ class AIAgent:
                         if isinstance(getattr(self, "client", None), Mock):
                             _use_streaming = False
 
+                    api_service_start_time = time.time()
                     if _use_streaming:
                         response = self._interruptible_streaming_api_call(
                             api_kwargs, on_first_delta=_stop_spinner
@@ -11951,7 +11968,7 @@ class AIAgent:
                     else:
                         response = self._interruptible_api_call(api_kwargs)
                     
-                    api_duration = time.time() - api_start_time
+                    api_duration = time.time() - api_service_start_time
                     
                     # Stop thinking spinner silently -- the response box or tool
                     # execution messages that follow are more informative.
@@ -12433,6 +12450,7 @@ class AIAgent:
                         self.session_completion_tokens += completion_tokens
                         self.session_total_tokens += total_tokens
                         self.session_api_calls += 1
+
                         self.session_input_tokens += canonical_usage.input_tokens
                         self.session_output_tokens += canonical_usage.output_tokens
                         self.session_cache_read_tokens += canonical_usage.cache_read_tokens
@@ -12550,7 +12568,7 @@ class AIAgent:
                         thinking_spinner = None
                     if self.thinking_callback:
                         self.thinking_callback("")
-                    api_elapsed = time.time() - api_start_time
+                    api_elapsed = time.time() - (api_service_start_time or api_start_time)
                     self._vprint(f"{self.log_prefix}⚡ Interrupted during API call.", force=True)
                     self._persist_session(messages, conversation_history)
                     interrupted = True
@@ -13023,7 +13041,7 @@ class AIAgent:
                         )
 
                     retry_count += 1
-                    elapsed_time = time.time() - api_start_time
+                    elapsed_time = time.time() - (api_service_start_time or api_start_time)
                     self._touch_activity(
                         f"API error recovery (attempt {retry_count}/{max_retries})"
                     )
@@ -14735,7 +14753,6 @@ class AIAgent:
                 last_reasoning = msg["reasoning"]
                 break
 
-        # Build result with interrupt info if applicable
         result = {
             "final_response": final_response,
             "last_reasoning": last_reasoning,
@@ -14756,6 +14773,7 @@ class AIAgent:
             "reasoning_tokens": self.session_reasoning_tokens,
             "prompt_tokens": self.session_prompt_tokens,
             "completion_tokens": self.session_completion_tokens,
+            "context_length": getattr(self.context_compressor, "context_length", 0) or 0,
             "total_tokens": self.session_total_tokens,
             "last_prompt_tokens": getattr(self.context_compressor, "last_prompt_tokens", 0) or 0,
             "estimated_cost_usd": self.session_estimated_cost_usd,

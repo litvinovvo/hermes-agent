@@ -1342,6 +1342,123 @@ class BasePlatformAdapter(ABC):
             return False
         return bool(self._auto_tts_default)
 
+    @staticmethod
+    def _truthy_config_value(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on", "enabled"}:
+                return True
+            if lowered in {"0", "false", "no", "off", "disabled"}:
+                return False
+        return default
+
+    @staticmethod
+    def _positive_int_config_value(value: Any, default: int) -> int:
+        try:
+            coerced = int(value)
+            return coerced if coerced > 0 else default
+        except (TypeError, ValueError):
+            return default
+
+    def _auto_tts_speech_adaptation_config(self) -> dict:
+        """Return voice-input auto-TTS hidden LLM adaptation settings."""
+        try:
+            from hermes_cli.config import load_config as _load_config
+            cfg = _load_config()
+        except Exception:
+            cfg = {}
+        tts = cfg.get("tts", {}) if isinstance(cfg, dict) else {}
+        raw = tts.get("speech_adaptation", {}) if isinstance(tts, dict) else {}
+        if not isinstance(raw, dict):
+            raw = {}
+        return {
+            "enabled": self._truthy_config_value(raw.get("enabled"), default=False),
+            "max_input_chars": raw.get("max_input_chars", 6000),
+        }
+
+    async def _adapt_voice_input_auto_tts_text(
+        self,
+        *,
+        visible_reply: str,
+        fallback_tts_text: str,
+    ) -> str:
+        """Optionally summarize a voice-input reply into hidden TTS text.
+
+        BasePlatformAdapter handles the voice-input auto-TTS path directly, so
+        it needs the same "compact spoken summary" guidance as the runner-level
+        /voice path rather than reading the full visible response aloud.
+        """
+        config = self._auto_tts_speech_adaptation_config()
+        if not config.get("enabled"):
+            return fallback_tts_text
+        fallback_excerpt = fallback_tts_text or ""
+        if not fallback_excerpt.strip():
+            return fallback_tts_text
+
+        source_limit = self._positive_int_config_value(config.get("max_input_chars"), 6000)
+        visible_excerpt = (visible_reply or "")[:source_limit]
+        system_prompt = (
+            "You rewrite assistant chat replies into concise speech-only summaries for TTS voice notes. "
+            "The speech text is hidden from the chat UI and will be synthesized aloud. "
+            "Return ONLY the text to speak, with no preface, no markdown, no bullet list, no code, "
+            "no commands, no file paths, no URLs, no MEDIA tags, and no runtime footer. "
+            "Prefer a compact voice summary over a full adapted retelling: keep the outcome, the key facts, "
+            "important caveats, and any immediate next step, while skipping secondary detail that remains visible in chat. "
+            "This is a style direction, not a hard length limit; if a detail is essential for the user to act safely or correctly, include it. "
+            "If the original reply is Russian, write natural Russian. If it is another language, keep that language. "
+            "For Russian OmniVoice-style speech, rewrite numbers, currencies, percentages, decimals, and compact stats "
+            "into natural words instead of raw symbols. Do not silently truncate mid-thought."
+        )
+        user_prompt = (
+            "Visible assistant reply:\n"
+            "<<<VISIBLE_REPLY\n"
+            f"{visible_excerpt}\n"
+            "VISIBLE_REPLY\n\n"
+            "Fallback cleaned TTS text (semantic hint, not mandatory wording):\n"
+            "<<<FALLBACK_TTS\n"
+            f"{fallback_excerpt}\n"
+            "FALLBACK_TTS\n\n"
+            "Write the final speech summary now."
+        )
+        try:
+            from agent.auxiliary_client import call_llm
+            from tools.tts_tool import _strip_markdown_for_tts
+
+            response = await asyncio.to_thread(
+                call_llm,
+                "tts_adaptation",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.35,
+            )
+            content = response.choices[0].message.content
+            if isinstance(content, list):
+                content = " ".join(
+                    str(part.get("text", part)) if isinstance(part, dict) else str(part)
+                    for part in content
+                )
+            adapted = str(content or "").strip().strip('"“”')
+            adapted = re.sub(
+                r"^\s*(?:speech(?: script)?|tts(?: text)?|текст(?: для речи)?):\s*",
+                "",
+                adapted,
+                flags=re.IGNORECASE,
+            )
+            adapted = _strip_markdown_for_tts(adapted).strip()
+            if adapted:
+                return adapted
+        except Exception as exc:
+            logger.warning("[%s] Auto-TTS speech adaptation failed: %s", self.name, exc)
+        return fallback_tts_text
+
     def set_fatal_error_handler(self, handler: Callable[["BasePlatformAdapter"], Awaitable[None] | None]) -> None:
         self._fatal_error_handler = handler
 
@@ -2921,9 +3038,15 @@ class BasePlatformAdapter(ABC):
                         from tools.tts_tool import text_to_speech_tool, check_tts_requirements
                         if check_tts_requirements():
                             import json as _json
-                            speech_text = re.sub(r'[*_`#\[\]()]', '', text_content)[:4000].strip()
+                            speech_text = re.sub(r'[*_`#\[\]()]', '', text_content).strip()
                             if not speech_text:
                                 raise ValueError("Empty text after markdown cleanup")
+                            speech_text = await self._adapt_voice_input_auto_tts_text(
+                                visible_reply=text_content,
+                                fallback_tts_text=speech_text,
+                            )
+                            if not speech_text:
+                                raise ValueError("Empty text after speech adaptation")
                             tts_result_str = await asyncio.to_thread(
                                 text_to_speech_tool, text=speech_text
                             )

@@ -188,6 +188,15 @@ class _FakeCreateStream:
         self.closed = True
 
 
+class _FakeResponsesStreamWithEvents(_FakeResponsesStream):
+    def __init__(self, *, events, final_response=None, final_error=None):
+        super().__init__(final_response=final_response, final_error=final_error)
+        self._events = list(events)
+
+    def __iter__(self):
+        return iter(self._events)
+
+
 def _codex_request_kwargs():
     return {
         "model": "gpt-5-codex",
@@ -420,6 +429,30 @@ def test_run_codex_stream_retries_when_completed_event_missing(monkeypatch):
     response = agent._run_codex_stream(_codex_request_kwargs())
     assert calls["stream"] == 2
     assert response.output[0].content[0].text == "stream ok"
+
+
+def test_run_codex_stream_preserves_usage_from_completed_event(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    final_without_usage = _codex_message_response("stream ok")
+    final_without_usage.usage = None
+    completed_with_usage = _codex_message_response("stream ok")
+
+    def _fake_stream(**kwargs):
+        return _FakeResponsesStreamWithEvents(
+            events=[SimpleNamespace(type="response.completed", response=completed_with_usage)],
+            final_response=final_without_usage,
+        )
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=_fake_stream,
+            create=lambda **kwargs: _codex_message_response("fallback"),
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+    assert response.usage is completed_with_usage.usage
+    assert response.usage.output_tokens == 3
 
 
 def test_run_codex_stream_falls_back_to_create_after_stream_completion_error(monkeypatch):

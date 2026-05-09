@@ -141,6 +141,7 @@ For every key, resolution order is: **host block > root > env var > default**.
 |-----|------|---------|-------------|
 | `writeFrequency` | string/int | `"async"` | `"async"` (background), `"turn"` (sync per turn), `"session"` (batch on end), or integer N (every N turns) |
 | `saveMessages` | bool | `true` | Persist messages to Honcho API |
+| `autoMigrateLocalMemoryFiles` | bool | `true` | Auto-upload legacy `~/.hermes/memories/MEMORY.md`, `USER.md`, and `SOUL.md` into a new Honcho session. Set `false` for curated-memory setups to avoid verbatim file ingestion. |
 
 ### Session Resolution
 

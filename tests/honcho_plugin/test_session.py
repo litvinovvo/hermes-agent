@@ -665,7 +665,7 @@ class TestPerSessionMigrateGuard:
     containing only <prior_memory_file> wrappers.
     """
 
-    def _make_provider_with_strategy(self, strategy, init_on_session_start=True):
+    def _make_provider_with_strategy(self, strategy, init_on_session_start=True, auto_migrate_local_memory_files=True):
         """Create a HonchoMemoryProvider and track migrate_memory_files calls."""
         from plugins.memory.honcho.client import HonchoClientConfig
         from unittest.mock import patch, MagicMock
@@ -676,6 +676,7 @@ class TestPerSessionMigrateGuard:
             recall_mode="tools",
             init_on_session_start=init_on_session_start,
             session_strategy=strategy,
+            auto_migrate_local_memory_files=auto_migrate_local_memory_files,
         )
 
         provider = HonchoMemoryProvider()
@@ -702,6 +703,14 @@ class TestPerSessionMigrateGuard:
         """per-directory strategy with empty session SHOULD call migrate_memory_files."""
         _, mock_manager = self._make_provider_with_strategy("per-directory")
         mock_manager.migrate_memory_files.assert_called_once()
+
+    def test_migrate_skipped_when_auto_migration_disabled(self):
+        """autoMigrateLocalMemoryFiles=false must prevent raw MEMORY.md/USER.md ingestion."""
+        _, mock_manager = self._make_provider_with_strategy(
+            "per-directory",
+            auto_migrate_local_memory_files=False,
+        )
+        mock_manager.migrate_memory_files.assert_not_called()
 
 
 class TestChunkMessage:

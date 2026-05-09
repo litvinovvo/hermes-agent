@@ -2614,6 +2614,8 @@ def test_default_spawn_auto_loads_kanban_worker_skill(kanban_home, monkeypatch):
         conn.close()
 
     cmd = captured["cmd"]
+    assert cmd[:3] == [os.sys.executable, "-m", "hermes_cli.main"]
+    assert "hermes" not in cmd[:1], f"spawn argv should not rely on PATH: {cmd}"
     assert "--skills" in cmd, f"spawn argv missing --skills: {cmd}"
     idx = cmd.index("--skills")
     assert cmd[idx + 1] == "kanban-worker", (
