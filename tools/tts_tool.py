@@ -1581,10 +1581,9 @@ def text_to_speech_tool(
     max_len = _resolve_max_text_length(provider, tts_config)
     if len(text) > max_len:
         logger.warning(
-            "TTS text too long for provider %s (%d chars), truncating to %d",
+            "TTS text is longer than configured/provider hint for %s (%d chars > %d); sending full text without truncation",
             provider, len(text), max_len,
         )
-        text = text[:max_len]
 
     # Detect platform from gateway env var to choose the best output format.
     # Telegram voice bubbles require Opus (.ogg); OpenAI and ElevenLabs can
@@ -2169,13 +2168,13 @@ from tools.registry import registry, tool_error
 
 TTS_SCHEMA = {
     "name": "text_to_speech",
-    "description": "Convert text to speech audio. Returns a MEDIA: path that the platform delivers as native audio. Compatible providers render as a voice bubble on Telegram; otherwise audio is sent as a regular attachment. In CLI mode, saves to ~/voice-memos/. Voice and provider are user-configured (built-in providers like edge/openai or custom command providers under tts.providers.<name>), not model-selected.",
+    "description": "Convert text to speech audio. Returns a MEDIA: path that the platform delivers as native audio. Compatible providers render as a voice bubble on Telegram; otherwise audio is sent as a regular attachment. For assistant replies, pass a concise, speech-friendly voice summary rather than the full visible answer unless the user asks for a full spoken readout. Voice and provider are user-configured (built-in providers like edge/openai or custom command providers under tts.providers.<name>), not model-selected.",
     "parameters": {
         "type": "object",
         "properties": {
             "text": {
                 "type": "string",
-                "description": "The text to convert to speech. Provider-specific character caps apply and are enforced automatically (OpenAI 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k depending on model); over-long input is truncated."
+                "description": "The text to convert to speech. For voice replies, aim for a compact natural spoken summary, not a full adapted transcript of the chat response. Provider-specific character caps are treated as warning hints; over-long input is sent without silent truncation, so split deliberately when needed."
             },
             "output_path": {
                 "type": "string",

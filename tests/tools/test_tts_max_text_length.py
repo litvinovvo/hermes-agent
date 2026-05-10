@@ -14,6 +14,7 @@ from tools.tts_tool import (
     ELEVENLABS_MODEL_MAX_TEXT_LENGTH,
     FALLBACK_MAX_TEXT_LENGTH,
     PROVIDER_MAX_TEXT_LENGTH,
+    TTS_SCHEMA,
     _resolve_max_text_length,
 )
 
@@ -55,7 +56,7 @@ class TestResolveMaxTextLength:
         assert _resolve_max_text_length("openai", cfg) == 9999
 
     def test_override_zero_falls_through(self):
-        # A broken/zero override must not disable truncation
+        # A broken/zero override must not disable provider length warning hints
         cfg = {"openai": {"max_text_length": 0}}
         assert _resolve_max_text_length("openai", cfg) == 4096
 
@@ -118,11 +119,22 @@ class TestResolveMaxTextLength:
         assert expected.issubset(PROVIDER_MAX_TEXT_LENGTH.keys())
 
 
-class TestTextToSpeechToolTruncation:
-    """End-to-end: verify the resolver actually drives the text_to_speech_tool
-    truncation path rather than the old 4000-char global."""
+class TestTextToSpeechSchemaGuidance:
+    def test_schema_tells_agents_to_use_voice_summary_without_truncation(self):
+        schema_text = " ".join([
+            TTS_SCHEMA["description"],
+            TTS_SCHEMA["parameters"]["properties"]["text"]["description"],
+        ]).lower()
 
-    def test_openai_truncates_at_4096_not_4000(self, tmp_path, monkeypatch, caplog):
+        assert "voice summary" in schema_text
+        assert "rather than the full visible answer" in schema_text
+        assert "without silent truncation" in schema_text
+
+
+class TestTextToSpeechToolLengthHints:
+    """End-to-end: length hints should warn, not silently truncate speech."""
+
+    def test_openai_warns_but_does_not_truncate(self, tmp_path, monkeypatch, caplog):
         import logging
         caplog.set_level(logging.WARNING, logger="tools.tts_tool")
 
@@ -145,8 +157,7 @@ class TestTextToSpeechToolTruncation:
         result = json.loads(text_to_speech_tool(text=text, output_path=out))
 
         assert result["success"] is True
-        # Should be truncated to 4096, not the old 4000
-        assert len(captured_text["text"]) == 4096
+        assert len(captured_text["text"]) == 5000
         # And the warning should mention the provider
         assert any("openai" in rec.message.lower() for rec in caplog.records)
 
@@ -173,8 +184,12 @@ class TestTextToSpeechToolTruncation:
         # xAI should accept the full 12000 chars
         assert len(captured_text["text"]) == 12000
 
-    def test_user_override_is_respected(self, tmp_path, monkeypatch):
-        # User says "cap openai at 100 chars" -- we must honor it
+    def test_user_override_is_warning_hint_not_truncation(self, tmp_path, monkeypatch, caplog):
+        import logging
+        caplog.set_level(logging.WARNING, logger="tools.tts_tool")
+
+        # User/provider length settings are treated as warning hints; they must
+        # never silently cut the speech text.
         text = "C" * 500
         captured_text = {}
 
@@ -194,4 +209,5 @@ class TestTextToSpeechToolTruncation:
         result = json.loads(text_to_speech_tool(text=text, output_path=out))
 
         assert result["success"] is True
-        assert len(captured_text["text"]) == 100
+        assert len(captured_text["text"]) == 500
+        assert any("without truncation" in rec.message.lower() for rec in caplog.records)

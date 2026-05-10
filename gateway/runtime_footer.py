@@ -1,10 +1,10 @@
 """Gateway runtime-metadata footer.
 
-Renders a compact footer showing runtime state (model, context %, cwd) and
-appends it to the FINAL message of an agent turn when enabled.  Off by default
-to keep replies minimal.
+Renders a compact footer showing runtime state (model, context %, cwd, etc.) and
+appends it to the FINAL message of an agent turn when enabled. Off by default to
+keep replies minimal.
 
-Config (``~/.hermes/config.yaml``)::
+Config (`~/.hermes/config.yaml`)::
 
     display:
       runtime_footer:
@@ -26,7 +26,6 @@ piecemeal, the footer is sent as a separate trailing message via
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Any, Iterable, Optional
 
 _DEFAULT_FIELDS: tuple[str, ...] = ("model", "context_pct", "cwd")

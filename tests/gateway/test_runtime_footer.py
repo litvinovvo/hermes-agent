@@ -142,7 +142,7 @@ def test_format_footer_unknown_field_silently_ignored():
         model="openai/gpt-5.4",
         context_tokens=50, context_length=100,
         cwd="/x",
-        fields=("model", "bogus", "context_pct"),
+        fields=("model", "bogus", "tokens_per_sec", "tps", "context_pct"),
     )
     assert out == "gpt-5.4 · 50%"
 

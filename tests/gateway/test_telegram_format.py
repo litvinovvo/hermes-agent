@@ -864,3 +864,41 @@ class TestTelegramGuestMentionGating:
         message.caption_entities = [_guest_mention_entity(text)]
 
         assert adapter._should_process_message(message) is True
+
+@pytest.mark.asyncio
+async def test_send_splits_source_markdown_before_markdownv2_formatting(adapter):
+    adapter.MAX_MESSAGE_LENGTH = 900
+    adapter._bot = MagicMock()
+
+    sent_texts = []
+
+    async def _fake_send_message(**kwargs):
+        text = kwargs["text"]
+        # Approximate Telegram's most common failure mode from post-format
+        # splitting: a chunk with an unclosed code entity should not be sent.
+        unescaped_backticks = text.count("`") - text.count("\\`")
+        assert unescaped_backticks % 2 == 0
+        assert kwargs.get("parse_mode") is not None
+        sent_texts.append(text)
+        msg = MagicMock()
+        msg.message_id = len(sent_texts)
+        return msg
+
+    adapter._bot.send_message = AsyncMock(side_effect=_fake_send_message)
+
+    content = (
+        "## Проверка\n\n"
+        "Файл: `/home/pc_lion/.hermes/hermes-agent/run_agent.py`\n\n"
+        "```bash\npython3 -m pytest tests/gateway/test_runtime_footer.py -q\n```\n\n"
+        "- пункт с `inline-code-value` и обычным текстом\n"
+        "- ещё пункт с **жирным** текстом и дефисами\n\n"
+    ) * 12
+
+    result = await adapter.send("123", content)
+
+    assert result.success is True
+    assert len(sent_texts) > 1
+    assert any("*Проверка*" in text for text in sent_texts)
+    assert any("```" in text for text in sent_texts)
+    assert any("inline-code-value" in text for text in sent_texts)
+    assert all(re.search(r" \\\([0-9]+/[0-9]+\\\)$", text) for text in sent_texts)
