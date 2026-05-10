@@ -549,15 +549,12 @@ class TelegramAdapter(BasePlatformAdapter):
         Supergroup/forum topics use ``message_thread_id``. True Bot API Direct
         Messages topics can opt in with explicit ``direct_messages_topic_id``
         metadata. Hermes-created private-chat topic lanes are marked with
-        ``telegram_dm_topic_reply_fallback`` and must send the private topic
-        thread id together with a reply anchor. Live testing showed that either
-        parameter alone can render outside the visible lane.
+        ``telegram_dm_topic_reply_fallback``. Prefer sending both the private
+        topic thread id and the reply anchor, but never drop the thread id just
+        because the anchor is missing/stale: omitting both routes the message to
+        the private chat's General lane.
         """
         if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
-            if reply_to_message_id is None:
-                reply_to_message_id = cls._metadata_reply_to_message_id(metadata)
-            if reply_to_message_id is None:
-                return {}
             return {"message_thread_id": cls._message_thread_id_for_send(thread_id)}
         direct_topic_id = cls._metadata_direct_messages_topic_id(metadata)
         if direct_topic_id is not None:
@@ -636,7 +633,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 raise
             logger.warning(
                 "[%s] Reply target deleted for Telegram %s, "
-                "retrying without reply/topic anchor: %s",
+                "retrying without reply anchor while preserving topic routing: %s",
                 self.name,
                 media_label,
                 send_err,
@@ -645,8 +642,6 @@ class TelegramAdapter(BasePlatformAdapter):
                 reset_media()
             retry_kwargs = dict(send_kwargs)
             retry_kwargs["reply_to_message_id"] = None
-            retry_kwargs.pop("message_thread_id", None)
-            retry_kwargs.pop("direct_messages_topic_id", None)
             return await send_fn(**retry_kwargs)
 
     def _fallback_ips(self) -> list[str]:
@@ -1623,9 +1618,14 @@ class TelegramAdapter(BasePlatformAdapter):
                         # specific cases instead of blindly retrying.
                         if _BadReq and isinstance(send_err, _BadReq):
                             if self._is_thread_not_found_error(send_err) and effective_thread_id is not None:
-                                # Thread doesn't exist — retry without
-                                # message_thread_id so the message still
-                                # reaches the chat.
+                                if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
+                                    logger.error(
+                                        "[%s] Telegram private-topic thread %s not found; refusing to send to General",
+                                        self.name, effective_thread_id,
+                                    )
+                                    raise
+                                # Non-private-topic fallback: the thread was deleted, so let
+                                # the message still reach the parent chat.
                                 logger.warning(
                                     "[%s] Thread %s not found, retrying without message_thread_id",
                                     self.name, effective_thread_id,
@@ -1644,17 +1644,13 @@ class TelegramAdapter(BasePlatformAdapter):
                                     self.name, send_err,
                                 )
                                 reply_to_id = None
-                                if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
-                                    thread_kwargs = {}
-                                    effective_thread_id = None
-                                else:
-                                    thread_kwargs = self._thread_kwargs_for_send(
-                                        chat_id,
-                                        thread_id,
-                                        metadata,
-                                        reply_to_message_id=reply_to_id,
-                                    )
-                                    effective_thread_id = thread_kwargs.get("message_thread_id")
+                                thread_kwargs = self._thread_kwargs_for_send(
+                                    chat_id,
+                                    thread_id,
+                                    metadata,
+                                    reply_to_message_id=reply_to_id,
+                                )
+                                effective_thread_id = thread_kwargs.get("message_thread_id")
                                 continue
                             # Other BadRequest errors are permanent — don't retry
                             raise

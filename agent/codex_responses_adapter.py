@@ -202,6 +202,16 @@ def _derive_responses_function_call_id(
 # Schema conversion
 # ---------------------------------------------------------------------------
 
+def _codex_tool_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "live", "enabled"}
+
+
 def _responses_tools(tools: Optional[List[Dict[str, Any]]] = None) -> Optional[List[Dict[str, Any]]]:
     """Convert chat-completions tool schemas to Responses function-tool schemas."""
     if not tools:
@@ -688,7 +698,20 @@ def _preflight_codex_api_kwargs(
         for idx, tool in enumerate(tools):
             if not isinstance(tool, dict):
                 raise ValueError(f"Codex Responses tools[{idx}] must be an object.")
-            if tool.get("type") != "function":
+            tool_type = tool.get("type")
+            if tool_type in {"web_search", "web_search_preview"}:
+                normalized_web_search: Dict[str, Any] = {"type": tool_type}
+                if "external_web_access" in tool:
+                    normalized_web_search["external_web_access"] = _codex_tool_bool(tool.get("external_web_access"))
+                for optional_key in ("search_context_size", "user_location"):
+                    if optional_key in tool:
+                        normalized_web_search[optional_key] = tool[optional_key]
+                normalized_tools.append(normalized_web_search)
+                continue
+            if tool_type == "image_generation":
+                normalized_tools.append({"type": "image_generation"})
+                continue
+            if tool_type != "function":
                 raise ValueError(f"Codex Responses tools[{idx}] has unsupported type {tool.get('type')!r}.")
 
             name = tool.get("name")
@@ -799,6 +822,32 @@ def _preflight_codex_api_kwargs(
 # Response extraction helpers
 # ---------------------------------------------------------------------------
 
+def _jsonable_response_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_jsonable_response_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _jsonable_response_value(v) for k, v in value.items()}
+    if hasattr(value, "model_dump"):
+        try:
+            return _jsonable_response_value(value.model_dump())
+        except Exception:
+            pass
+    if hasattr(value, "to_dict"):
+        try:
+            return _jsonable_response_value(value.to_dict())
+        except Exception:
+            pass
+    if hasattr(value, "__dict__"):
+        return {
+            str(k): _jsonable_response_value(v)
+            for k, v in vars(value).items()
+            if not str(k).startswith("_")
+        }
+    return str(value)
+
+
 def _extract_responses_message_text(item: Any) -> str:
     """Extract assistant text from a Responses message output item."""
     content = getattr(item, "content", None)
@@ -876,6 +925,8 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
     reasoning_parts: List[str] = []
     reasoning_items_raw: List[Dict[str, Any]] = []
     message_items_raw: List[Dict[str, Any]] = []
+    image_generation_items_raw: List[Dict[str, Any]] = []
+    web_search_items_raw: List[Dict[str, Any]] = []
     tool_calls: List[Any] = []
     has_incomplete_items = response_status in {"queued", "in_progress", "incomplete"}
     saw_commentary_phase = False
@@ -939,6 +990,23 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
                             raw_summary.append({"type": "summary_text", "text": text})
                     raw_item["summary"] = raw_summary
                 reasoning_items_raw.append(raw_item)
+        elif item_type == "image_generation_call":
+            raw_image_item: Dict[str, Any] = {"type": "image_generation_call"}
+            for attr in ("id", "status", "revised_prompt", "result"):
+                value = getattr(item, attr, None)
+                if isinstance(value, str) and value:
+                    raw_image_item[attr] = value
+            image_generation_items_raw.append(raw_image_item)
+        elif item_type == "web_search_call":
+            raw_search_item: Dict[str, Any] = {"type": "web_search_call"}
+            for attr in ("id", "status"):
+                value = getattr(item, attr, None)
+                if isinstance(value, str) and value:
+                    raw_search_item[attr] = value
+            action = _jsonable_response_value(getattr(item, "action", None))
+            if action is not None:
+                raw_search_item["action"] = action
+            web_search_items_raw.append(raw_search_item)
         elif item_type == "function_call":
             if item_status in {"queued", "in_progress", "incomplete"}:
                 continue
@@ -1029,6 +1097,8 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
         reasoning_details=None,
         codex_reasoning_items=reasoning_items_raw or None,
         codex_message_items=message_items_raw or None,
+        codex_image_generation_items=image_generation_items_raw or None,
+        codex_web_search_items=web_search_items_raw or None,
     )
 
     if tool_calls:

@@ -322,6 +322,200 @@ def test_build_api_kwargs_codex(monkeypatch):
     assert "extra_body" not in kwargs
 
 
+def test_preflight_codex_api_kwargs_allows_native_web_search_tool():
+    from agent.codex_responses_adapter import _preflight_codex_api_kwargs
+
+    result = _preflight_codex_api_kwargs(
+        {
+            "model": "gpt-5-codex",
+            "instructions": "sys",
+            "input": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "web_search", "external_web_access": "true"}],
+            "store": False,
+        }
+    )
+
+    assert result["tools"] == [{"type": "web_search", "external_web_access": True}]
+
+
+def test_preflight_codex_api_kwargs_allows_native_image_generation_tool():
+    from agent.codex_responses_adapter import _preflight_codex_api_kwargs
+
+    result = _preflight_codex_api_kwargs(
+        {
+            "model": "gpt-5-codex",
+            "instructions": "sys",
+            "input": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "image_generation"}],
+            "store": False,
+        }
+    )
+
+    assert result["tools"] == [{"type": "image_generation"}]
+
+
+def test_build_api_kwargs_codex_native_search_suppresses_managed_search(monkeypatch):
+    def _fake_tools(**kwargs):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Search the web.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_extract",
+                    "description": "Extract a page.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "terminal",
+                    "description": "Run shell commands.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ]
+
+    import hermes_cli.config
+
+    monkeypatch.setattr(run_agent, "get_tool_definitions", _fake_tools)
+    monkeypatch.setattr(run_agent, "check_toolset_requirements", lambda: {})
+    monkeypatch.setattr(hermes_cli.config, "load_config", lambda *a, **k: {"codex": {"web_search": "live"}})
+
+    agent = run_agent.AIAgent(
+        model="gpt-5-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key="codex-token",
+        quiet_mode=True,
+        max_iterations=4,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+
+    kwargs = agent._build_api_kwargs(
+        [
+            {"role": "system", "content": "You are Hermes."},
+            {"role": "user", "content": "Search current news"},
+        ]
+    )
+
+    tool_names = [tool.get("name") for tool in kwargs["tools"] if tool.get("type") == "function"]
+    assert "web_search" not in tool_names
+    assert "web_extract" in tool_names
+    assert "terminal" in tool_names
+    assert {"type": "web_search", "external_web_access": True} in kwargs["tools"]
+
+
+def test_build_api_kwargs_codex_native_search_forces_freshness_prompt(monkeypatch):
+    def _fake_tools(**kwargs):
+        return []
+
+    import hermes_cli.config
+
+    monkeypatch.setattr(run_agent, "get_tool_definitions", _fake_tools)
+    monkeypatch.setattr(run_agent, "check_toolset_requirements", lambda: {})
+    monkeypatch.setattr(
+        hermes_cli.config,
+        "load_config",
+        lambda *a, **k: {"codex": {"web_search": "live", "web_search_tool_choice": "auto"}},
+    )
+
+    agent = run_agent.AIAgent(
+        model="gpt-5-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key="codex-token",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+
+    kwargs = agent._build_api_kwargs([{"role": "user", "content": "Поищи новости актуальные на сегодня"}])
+
+    assert kwargs["tool_choice"] == {
+        "type": "allowed_tools",
+        "mode": "required",
+        "tools": [{"type": "web_search"}],
+    }
+
+
+def test_build_assistant_message_persists_codex_web_search_items(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    assistant = SimpleNamespace(
+        content="Found it.",
+        tool_calls=None,
+        reasoning=None,
+        codex_web_search_items=[
+            {
+                "type": "web_search_call",
+                "id": "ws_abc",
+                "status": "completed",
+                "action": {"query": "latest news"},
+            }
+        ],
+    )
+
+    msg = agent._build_assistant_message(assistant, "stop")
+
+    assert msg["codex_web_search_items"] == assistant.codex_web_search_items
+
+
+def test_build_api_kwargs_codex_native_image_generation_suppresses_managed_image(monkeypatch):
+    def _fake_tools(**kwargs):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "image_generate",
+                    "description": "Generate an image.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "vision_analyze",
+                    "description": "Analyze an image.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ]
+
+    import hermes_cli.config
+
+    monkeypatch.setattr(run_agent, "get_tool_definitions", _fake_tools)
+    monkeypatch.setattr(run_agent, "check_toolset_requirements", lambda: {})
+    monkeypatch.setattr(hermes_cli.config, "load_config", lambda *a, **k: {"codex": {"image_generation": "enabled"}})
+
+    agent = run_agent.AIAgent(
+        model="gpt-5-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key="codex-token",
+        quiet_mode=True,
+        max_iterations=4,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+
+    kwargs = agent._build_api_kwargs(
+        [
+            {"role": "system", "content": "You are Hermes."},
+            {"role": "user", "content": "Generate an image"},
+        ]
+    )
+
+    tool_names = [tool.get("name") for tool in kwargs["tools"] if tool.get("type") == "function"]
+    assert "image_generate" not in tool_names
+    assert "vision_analyze" in tool_names
+    assert {"type": "image_generation"} in kwargs["tools"]
+
+
 def test_build_api_kwargs_codex_clamps_minimal_effort(monkeypatch):
     """'minimal' reasoning effort is clamped to 'low' on the Responses API.
 
@@ -1801,3 +1995,97 @@ def test_preflight_codex_input_deduplicates_reasoning_ids(monkeypatch):
     # IDs must be stripped — with store=False the API 404s on id lookups.
     for it in reasoning_items:
         assert "id" not in it
+
+
+def test_persist_codex_image_generation_artifacts_writes_media_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(run_agent, "get_hermes_home", lambda: tmp_path)
+    agent = _build_agent(monkeypatch)
+    method = run_agent.AIAgent._persist_codex_image_generation_artifacts
+    assistant_message = SimpleNamespace(
+        provider_data={
+            "codex_image_generation_items": [
+                {
+                    "type": "image_generation_call",
+                    "id": "ig_abc",
+                    "status": "completed",
+                    "revised_prompt": "A small cat",
+                    "result": "aW1hZ2UtYnl0ZXM=",
+                }
+            ]
+        },
+    )
+
+    media_paths = method(agent, assistant_message)
+
+    assert len(media_paths) == 1
+    assert media_paths[0].startswith(str(tmp_path / "cache" / "images"))
+    assert media_paths[0].endswith(".png")
+    assert (tmp_path / "cache" / "images").exists()
+    assert open(media_paths[0], "rb").read() == b"image-bytes"
+    sanitized = assistant_message.provider_data["codex_image_generation_items"][0]
+    assert "result" not in sanitized
+    assert sanitized["output_path"] == media_paths[0]
+    assert sanitized["mime_type"] == "image/png"
+
+
+def test_persisted_codex_image_metadata_is_saved_by_build_assistant_message(monkeypatch, tmp_path):
+    monkeypatch.setattr(run_agent, "get_hermes_home", lambda: tmp_path)
+    agent = _build_agent(monkeypatch)
+    assistant_message = SimpleNamespace(
+        content="",
+        tool_calls=None,
+        reasoning=None,
+        provider_data={
+            "codex_image_generation_items": [
+                {
+                    "type": "image_generation_call",
+                    "id": "ig_trace",
+                    "status": "completed",
+                    "revised_prompt": "A robot avatar",
+                    "result": "aW1hZ2UtYnl0ZXM=",
+                }
+            ]
+        },
+    )
+
+    media_paths = agent._persist_codex_image_generation_artifacts(assistant_message)
+    assistant_message.content = "Generated image:\n" + "\n".join(f"MEDIA:{path}" for path in media_paths)
+    msg = agent._build_assistant_message(assistant_message, "stop")
+
+    assert media_paths
+    assert "codex_image_generation_items" in msg
+    persisted = msg["codex_image_generation_items"][0]
+    assert persisted["type"] == "image_generation_call"
+    assert persisted["id"] == "ig_trace"
+    assert persisted["output_path"] == media_paths[0]
+    assert persisted["mime_type"] == "image/png"
+    assert persisted["result_sha256"]
+    assert "result" not in persisted
+
+
+def test_build_assistant_message_reads_codex_metadata_from_provider_data(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    assistant = SimpleNamespace(
+        content="Native traces present.",
+        tool_calls=None,
+        reasoning=None,
+        provider_data={
+            "codex_web_search_items": [
+                {"type": "web_search_call", "id": "ws_123", "status": "completed"},
+            ],
+            "codex_image_generation_items": [
+                {
+                    "type": "image_generation_call",
+                    "id": "ig_123",
+                    "status": "completed",
+                    "output_path": "/tmp/codex_ig_123.png",
+                    "mime_type": "image/png",
+                },
+            ],
+        },
+    )
+
+    msg = agent._build_assistant_message(assistant, "stop")
+
+    assert msg["codex_web_search_items"] == assistant.provider_data["codex_web_search_items"]
+    assert msg["codex_image_generation_items"] == assistant.provider_data["codex_image_generation_items"]

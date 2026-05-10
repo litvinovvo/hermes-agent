@@ -136,6 +136,18 @@ with the Generative Language API enabled.
 
 :::info Codex Note
 The OpenAI Codex provider authenticates via device code (open a URL, enter a code). Hermes stores the resulting credentials in its own auth store under `~/.hermes/auth.json` and can import existing Codex CLI credentials from `~/.codex/auth.json` when present. No Codex CLI installation is required.
+
+Codex can also expose provider-native Responses API tools without launching Codex CLI as a subprocess. Native tools are opt-in:
+
+```bash
+hermes config set codex.web_search live           # live external web access
+hermes config set codex.web_search cached         # cached/no-live mode
+hermes config set codex.web_search disabled       # off
+hermes config set codex.image_generation enabled  # hosted image generation
+hermes config set codex.image_generation disabled # off
+```
+
+When enabled for the OpenAI Codex provider, Hermes declares hosted Responses tools on the current model call and suppresses conflicting managed Hermes function tools to avoid presenting two tools with the same logical name. Enabling native `web_search` suppresses managed `web_search` while leaving tools such as `web_extract` available. Enabling native `image_generation` suppresses managed `image_generate`; generated image results are decoded from the Responses `image_generation_call` payload into `MEDIA:` files under Hermes cache for normal CLI/gateway delivery.
 :::
 
 :::warning
@@ -1429,3 +1441,6 @@ Fallback is configured exclusively through `config.yaml` — or interactively vi
 
 - [Configuration](/docs/user-guide/configuration) — General configuration (directory structure, config precedence, terminal backends, memory, compression, and more)
 - [Environment Variables](/docs/reference/environment-variables) — Complete reference of all environment variables
+
+
+Codex native web search can force the hosted search tool for freshness-sensitive prompts with `codex.web_search_tool_choice: auto` (default). Use `required` to force it on every request or `none` to leave tool choice fully to the model.

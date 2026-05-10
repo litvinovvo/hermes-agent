@@ -129,6 +129,41 @@ class ResponsesApiTransport(ProviderTransport):
         if request_overrides:
             kwargs.update(request_overrides)
 
+        native_tools = params.get("native_tools") or []
+        if native_tools:
+            from agent.provider_native_tools import (
+                codex_native_tool_choice_for_request,
+                codex_responses_tools_for_native_tools,
+                merge_include_values,
+            )
+
+            response_native_tools = codex_responses_tools_for_native_tools(native_tools)
+            if response_native_tools:
+                existing_tools = kwargs.get("tools")
+                merged_tools = list(existing_tools) if isinstance(existing_tools, list) else []
+                existing_native_types = {
+                    tool.get("type")
+                    for tool in merged_tools
+                    if isinstance(tool, dict) and tool.get("type") != "function"
+                }
+                for native_tool in response_native_tools:
+                    if native_tool.get("type") not in existing_native_types:
+                        merged_tools.append(native_tool)
+                        existing_native_types.add(native_tool.get("type"))
+                kwargs["tools"] = merged_tools or None
+
+            include_additions = [
+                include_value
+                for spec in native_tools
+                for include_value in getattr(spec, "include", ())
+            ]
+            if include_additions:
+                kwargs["include"] = merge_include_values(kwargs.get("include"), include_additions)
+
+            forced_tool_choice = codex_native_tool_choice_for_request(native_tools, messages)
+            if forced_tool_choice and kwargs.get("tool_choice") == "auto":
+                kwargs["tool_choice"] = forced_tool_choice
+
         if is_codex_backend:
             prompt_cache_key = kwargs.get("prompt_cache_key")
             cache_scope_id = str(prompt_cache_key or session_id or "").strip()
@@ -198,6 +233,10 @@ class ResponsesApiTransport(ProviderTransport):
             provider_data["codex_reasoning_items"] = msg.codex_reasoning_items
         if msg and hasattr(msg, "codex_message_items") and msg.codex_message_items:
             provider_data["codex_message_items"] = msg.codex_message_items
+        if msg and hasattr(msg, "codex_image_generation_items") and msg.codex_image_generation_items:
+            provider_data["codex_image_generation_items"] = msg.codex_image_generation_items
+        if msg and hasattr(msg, "codex_web_search_items") and msg.codex_web_search_items:
+            provider_data["codex_web_search_items"] = msg.codex_web_search_items
         if msg and hasattr(msg, "reasoning_details") and msg.reasoning_details:
             provider_data["reasoning_details"] = msg.reasoning_details
 
