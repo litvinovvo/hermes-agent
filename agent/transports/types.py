@@ -136,6 +136,11 @@ class NormalizedResponse:
         pd = self.provider_data or {}
         return pd.get("codex_image_generation_items")
 
+    @property
+    def codex_web_search_items(self):
+        pd = self.provider_data or {}
+        return pd.get("codex_web_search_items")
+
 
 # ---------------------------------------------------------------------------
 # Factory helpers

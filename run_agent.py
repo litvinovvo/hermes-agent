@@ -9779,6 +9779,13 @@ class AIAgent:
         if codex_image_generation_items:
             msg["codex_image_generation_items"] = codex_image_generation_items
 
+        # Codex Responses API: preserve hosted web_search traces for
+        # observability/debugging. These are metadata-only items and are not
+        # replayed as assistant input on follow-up turns.
+        codex_web_search_items = getattr(assistant_message, "codex_web_search_items", None)
+        if codex_web_search_items:
+            msg["codex_web_search_items"] = codex_web_search_items
+
         if assistant_tool_calls:
             tool_calls = []
             for tool_call in assistant_tool_calls:

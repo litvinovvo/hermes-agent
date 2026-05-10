@@ -404,6 +404,59 @@ def test_build_api_kwargs_codex_native_search_suppresses_managed_search(monkeypa
     assert {"type": "web_search", "external_web_access": True} in kwargs["tools"]
 
 
+def test_build_api_kwargs_codex_native_search_forces_freshness_prompt(monkeypatch):
+    def _fake_tools(**kwargs):
+        return []
+
+    import hermes_cli.config
+
+    monkeypatch.setattr(run_agent, "get_tool_definitions", _fake_tools)
+    monkeypatch.setattr(run_agent, "check_toolset_requirements", lambda: {})
+    monkeypatch.setattr(
+        hermes_cli.config,
+        "load_config",
+        lambda *a, **k: {"codex": {"web_search": "live", "web_search_tool_choice": "auto"}},
+    )
+
+    agent = run_agent.AIAgent(
+        model="gpt-5-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key="codex-token",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+
+    kwargs = agent._build_api_kwargs([{"role": "user", "content": "Поищи новости актуальные на сегодня"}])
+
+    assert kwargs["tool_choice"] == {
+        "type": "allowed_tools",
+        "mode": "required",
+        "tools": [{"type": "web_search"}],
+    }
+
+
+def test_build_assistant_message_persists_codex_web_search_items(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    assistant = SimpleNamespace(
+        content="Found it.",
+        tool_calls=None,
+        reasoning=None,
+        codex_web_search_items=[
+            {
+                "type": "web_search_call",
+                "id": "ws_abc",
+                "status": "completed",
+                "action": {"query": "latest news"},
+            }
+        ],
+    )
+
+    msg = agent._build_assistant_message(assistant, "stop")
+
+    assert msg["codex_web_search_items"] == assistant.codex_web_search_items
+
+
 def test_build_api_kwargs_codex_native_image_generation_suppresses_managed_image(monkeypatch):
     def _fake_tools(**kwargs):
         return [

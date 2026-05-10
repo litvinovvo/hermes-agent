@@ -822,6 +822,32 @@ def _preflight_codex_api_kwargs(
 # Response extraction helpers
 # ---------------------------------------------------------------------------
 
+def _jsonable_response_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_jsonable_response_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _jsonable_response_value(v) for k, v in value.items()}
+    if hasattr(value, "model_dump"):
+        try:
+            return _jsonable_response_value(value.model_dump())
+        except Exception:
+            pass
+    if hasattr(value, "to_dict"):
+        try:
+            return _jsonable_response_value(value.to_dict())
+        except Exception:
+            pass
+    if hasattr(value, "__dict__"):
+        return {
+            str(k): _jsonable_response_value(v)
+            for k, v in vars(value).items()
+            if not str(k).startswith("_")
+        }
+    return str(value)
+
+
 def _extract_responses_message_text(item: Any) -> str:
     """Extract assistant text from a Responses message output item."""
     content = getattr(item, "content", None)
@@ -900,6 +926,7 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
     reasoning_items_raw: List[Dict[str, Any]] = []
     message_items_raw: List[Dict[str, Any]] = []
     image_generation_items_raw: List[Dict[str, Any]] = []
+    web_search_items_raw: List[Dict[str, Any]] = []
     tool_calls: List[Any] = []
     has_incomplete_items = response_status in {"queued", "in_progress", "incomplete"}
     saw_commentary_phase = False
@@ -970,6 +997,16 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
                 if isinstance(value, str) and value:
                     raw_image_item[attr] = value
             image_generation_items_raw.append(raw_image_item)
+        elif item_type == "web_search_call":
+            raw_search_item: Dict[str, Any] = {"type": "web_search_call"}
+            for attr in ("id", "status"):
+                value = getattr(item, attr, None)
+                if isinstance(value, str) and value:
+                    raw_search_item[attr] = value
+            action = _jsonable_response_value(getattr(item, "action", None))
+            if action is not None:
+                raw_search_item["action"] = action
+            web_search_items_raw.append(raw_search_item)
         elif item_type == "function_call":
             if item_status in {"queued", "in_progress", "incomplete"}:
                 continue
@@ -1061,6 +1098,7 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
         codex_reasoning_items=reasoning_items_raw or None,
         codex_message_items=message_items_raw or None,
         codex_image_generation_items=image_generation_items_raw or None,
+        codex_web_search_items=web_search_items_raw or None,
     )
 
     if tool_calls:

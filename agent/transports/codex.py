@@ -124,6 +124,7 @@ class ResponsesApiTransport(ProviderTransport):
         native_tools = params.get("native_tools") or []
         if native_tools:
             from agent.provider_native_tools import (
+                codex_native_tool_choice_for_request,
                 codex_responses_tools_for_native_tools,
                 merge_include_values,
             )
@@ -150,6 +151,10 @@ class ResponsesApiTransport(ProviderTransport):
             ]
             if include_additions:
                 kwargs["include"] = merge_include_values(kwargs.get("include"), include_additions)
+
+            forced_tool_choice = codex_native_tool_choice_for_request(native_tools, messages)
+            if forced_tool_choice and kwargs.get("tool_choice") == "auto":
+                kwargs["tool_choice"] = forced_tool_choice
 
         if is_codex_backend:
             prompt_cache_key = kwargs.get("prompt_cache_key")
@@ -222,6 +227,8 @@ class ResponsesApiTransport(ProviderTransport):
             provider_data["codex_message_items"] = msg.codex_message_items
         if msg and hasattr(msg, "codex_image_generation_items") and msg.codex_image_generation_items:
             provider_data["codex_image_generation_items"] = msg.codex_image_generation_items
+        if msg and hasattr(msg, "codex_web_search_items") and msg.codex_web_search_items:
+            provider_data["codex_web_search_items"] = msg.codex_web_search_items
         if msg and hasattr(msg, "reasoning_details") and msg.reasoning_details:
             provider_data["reasoning_details"] = msg.reasoning_details
 

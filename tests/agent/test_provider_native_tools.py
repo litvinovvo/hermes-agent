@@ -112,3 +112,71 @@ def test_filter_managed_tools_can_suppress_native_image_generation():
     filtered = filter_managed_tools_for_native_tools(tools, specs)
 
     assert [tool["function"]["name"] for tool in filtered] == ["vision_analyze", "web_search"]
+
+
+def test_codex_native_tool_choice_for_freshness_request():
+    from agent.provider_native_tools import codex_native_tool_choice_for_request
+
+    specs = resolve_provider_native_tools(
+        {"codex": {"web_search": "live", "web_search_tool_choice": "auto"}},
+        provider="openai-codex",
+        api_mode="codex_responses",
+        base_url="https://chatgpt.com/backend-api/codex",
+    )
+
+    assert codex_native_tool_choice_for_request(
+        specs,
+        [{"role": "user", "content": "Поищи актуальные новости на сегодня"}],
+    ) == {
+        "type": "allowed_tools",
+        "mode": "required",
+        "tools": [{"type": "web_search"}],
+    }
+
+
+def test_codex_native_tool_choice_auto_ignores_non_freshness_request():
+    from agent.provider_native_tools import codex_native_tool_choice_for_request
+
+    specs = resolve_provider_native_tools(
+        {"codex": {"web_search": "live", "web_search_tool_choice": "auto"}},
+        provider="openai-codex",
+        api_mode="codex_responses",
+        base_url="https://chatgpt.com/backend-api/codex",
+    )
+
+    assert codex_native_tool_choice_for_request(
+        specs,
+        [{"role": "user", "content": "Explain binary search."}],
+    ) is None
+
+
+def test_codex_native_tool_choice_required_forces_every_request():
+    from agent.provider_native_tools import codex_native_tool_choice_for_request
+
+    specs = resolve_provider_native_tools(
+        {"codex": {"web_search": "live", "web_search_tool_choice": "required"}},
+        provider="openai-codex",
+        api_mode="codex_responses",
+        base_url="https://chatgpt.com/backend-api/codex",
+    )
+
+    assert codex_native_tool_choice_for_request(
+        specs,
+        [{"role": "user", "content": "Explain binary search."}],
+    )["mode"] == "required"
+
+
+def test_codex_native_tool_choice_none_never_forces():
+    from agent.provider_native_tools import codex_native_tool_choice_for_request
+
+    specs = resolve_provider_native_tools(
+        {"codex": {"web_search": "live", "web_search_tool_choice": "none"}},
+        provider="openai-codex",
+        api_mode="codex_responses",
+        base_url="https://chatgpt.com/backend-api/codex",
+    )
+
+    assert codex_native_tool_choice_for_request(
+        specs,
+        [{"role": "user", "content": "latest news today"}],
+    ) is None

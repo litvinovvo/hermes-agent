@@ -245,6 +245,52 @@ class TestCodexBuildKwargs:
         assert kw["include"].count("web_search_call.action.sources") == 1
         assert kw["include"] == ["reasoning.encrypted_content", "web_search_call.action.sources"]
 
+    def test_native_web_search_forces_tool_choice_for_freshness_prompt(self, transport):
+        from agent.provider_native_tools import NativeToolSpec
+
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "latest news today"}],
+            tools=[],
+            native_tools=[
+                NativeToolSpec(
+                    logical_name="web_search",
+                    provider_tool_type="web_search",
+                    mode="live",
+                    suppress_managed_tools=("web_search",),
+                    include=("web_search_call.action.sources",),
+                    tool_choice="auto",
+                )
+            ],
+        )
+
+        assert kw["tool_choice"] == {
+            "type": "allowed_tools",
+            "mode": "required",
+            "tools": [{"type": "web_search"}],
+        }
+
+    def test_native_web_search_respects_explicit_request_override_tool_choice(self, transport):
+        from agent.provider_native_tools import NativeToolSpec
+
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "latest news today"}],
+            tools=[],
+            native_tools=[
+                NativeToolSpec(
+                    logical_name="web_search",
+                    provider_tool_type="web_search",
+                    mode="live",
+                    suppress_managed_tools=("web_search",),
+                    tool_choice="auto",
+                )
+            ],
+            request_overrides={"tool_choice": "none"},
+        )
+
+        assert kw["tool_choice"] == "none"
+
     def test_native_image_generation_adds_hosted_responses_tool(self, transport):
         from agent.provider_native_tools import NativeToolSpec
 
@@ -386,6 +432,47 @@ class TestCodexNormalizeResponse:
                 "status": "completed",
                 "revised_prompt": "A small cat",
                 "result": "aW1hZ2UtYnl0ZXM=",
+            }
+        ]
+
+    def test_web_search_items_preserved_in_provider_data(self, transport):
+        r = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="web_search_call",
+                    id="ws_abc",
+                    status="completed",
+                    action=SimpleNamespace(
+                        type="search",
+                        query="latest news",
+                        sources=[SimpleNamespace(type="url", url="https://example.com/news")],
+                    ),
+                ),
+                SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    content=[SimpleNamespace(type="output_text", text="Found it.")],
+                    status="completed",
+                ),
+            ],
+            status="completed",
+            incomplete_details=None,
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5,
+                                  input_tokens_details=None, output_tokens_details=None),
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.codex_web_search_items == [
+            {
+                "type": "web_search_call",
+                "id": "ws_abc",
+                "status": "completed",
+                "action": {
+                    "type": "search",
+                    "query": "latest news",
+                    "sources": [{"type": "url", "url": "https://example.com/news"}],
+                },
             }
         ]
 

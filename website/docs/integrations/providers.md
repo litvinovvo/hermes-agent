@@ -1441,3 +1441,6 @@ Fallback is configured exclusively through `config.yaml` — or interactively vi
 
 - [Configuration](/docs/user-guide/configuration) — General configuration (directory structure, config precedence, terminal backends, memory, compression, and more)
 - [Environment Variables](/docs/reference/environment-variables) — Complete reference of all environment variables
+
+
+Codex native web search can force the hosted search tool for freshness-sensitive prompts with `codex.web_search_tool_choice: auto` (default). Use `required` to force it on every request or `none` to leave tool choice fully to the model.
