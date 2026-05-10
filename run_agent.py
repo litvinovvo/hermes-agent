@@ -9558,6 +9558,41 @@ class AIAgent:
 
         return {"effort": requested_effort}
 
+    @staticmethod
+    def _get_codex_provider_metadata_items(assistant_message, key: str) -> list[dict[str, Any]] | None:
+        """Return Codex hosted-tool metadata from either provider_data or legacy attrs.
+
+        NormalizedResponse exposes Codex metadata as properties backed by
+        provider_data, while the older Codex adapter path returns a
+        SimpleNamespace with top-level attributes. Keep reads centralized so
+        hosted tools like web_search and image_generation persist traces
+        uniformly regardless of which response shape reached the agent loop.
+        """
+
+        provider_data = getattr(assistant_message, "provider_data", None)
+        if isinstance(provider_data, dict):
+            value = provider_data.get(key)
+            if isinstance(value, list) and value:
+                return value
+
+        value = getattr(assistant_message, key, None)
+        if isinstance(value, list) and value:
+            return value
+        return None
+
+    @staticmethod
+    def _set_codex_provider_metadata_items(assistant_message, key: str, items: list[dict[str, Any]] | None) -> None:
+        """Write Codex hosted-tool metadata back onto the active response object."""
+
+        provider_data = getattr(assistant_message, "provider_data", None)
+        if isinstance(provider_data, dict):
+            provider_data[key] = items or None
+            return
+        try:
+            setattr(assistant_message, key, items or None)
+        except Exception:
+            pass
+
     def _persist_codex_image_generation_artifacts(self, assistant_message) -> list[str]:
         """Decode Codex native image_generation_call results into MEDIA files.
 
@@ -9567,12 +9602,8 @@ class AIAgent:
         paths before session persistence.
         """
 
-        items = getattr(assistant_message, "codex_image_generation_items", None)
-        if not isinstance(items, list) or not items:
-            provider_data = getattr(assistant_message, "provider_data", None)
-            if isinstance(provider_data, dict):
-                items = provider_data.get("codex_image_generation_items")
-        if not isinstance(items, list) or not items:
+        items = self._get_codex_provider_metadata_items(assistant_message, "codex_image_generation_items")
+        if not items:
             return []
 
         images_dir = get_hermes_home() / "cache" / "images"
@@ -9619,14 +9650,11 @@ class AIAgent:
             sanitized_items.append(sanitized)
             media_paths.append(str(output_path))
 
-        provider_data = getattr(assistant_message, "provider_data", None)
-        if isinstance(provider_data, dict):
-            provider_data["codex_image_generation_items"] = sanitized_items or None
-        elif hasattr(assistant_message, "codex_image_generation_items"):
-            try:
-                assistant_message.codex_image_generation_items = sanitized_items or None
-            except Exception:
-                pass
+        self._set_codex_provider_metadata_items(
+            assistant_message,
+            "codex_image_generation_items",
+            sanitized_items or None,
+        )
         return media_paths
 
     def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:
@@ -9771,20 +9799,18 @@ class AIAgent:
         if codex_message_items:
             msg["codex_message_items"] = codex_message_items
 
-        # Codex Responses API: preserve image-generation artifact metadata after
-        # the base64 payload has been decoded to MEDIA files. The raw result is
-        # intentionally stripped by _persist_codex_image_generation_artifacts()
-        # before this message is persisted so session history does not balloon.
-        codex_image_generation_items = getattr(assistant_message, "codex_image_generation_items", None)
-        if codex_image_generation_items:
-            msg["codex_image_generation_items"] = codex_image_generation_items
-
-        # Codex Responses API: preserve hosted web_search traces for
-        # observability/debugging. These are metadata-only items and are not
-        # replayed as assistant input on follow-up turns.
-        codex_web_search_items = getattr(assistant_message, "codex_web_search_items", None)
-        if codex_web_search_items:
-            msg["codex_web_search_items"] = codex_web_search_items
+        # Codex Responses API: preserve hosted-tool traces for
+        # observability/debugging. These metadata-only items are not replayed
+        # as assistant input on follow-up turns. Image generation results are
+        # sanitized by _persist_codex_image_generation_artifacts() before this
+        # message is persisted so session history does not balloon with base64.
+        for codex_metadata_key in ("codex_image_generation_items", "codex_web_search_items"):
+            codex_metadata_items = self._get_codex_provider_metadata_items(
+                assistant_message,
+                codex_metadata_key,
+            )
+            if codex_metadata_items:
+                msg[codex_metadata_key] = codex_metadata_items
 
         if assistant_tool_calls:
             tool_calls = []

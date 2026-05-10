@@ -1966,7 +1966,7 @@ def test_preflight_codex_input_deduplicates_reasoning_ids(monkeypatch):
 
 def test_persist_codex_image_generation_artifacts_writes_media_file(monkeypatch, tmp_path):
     monkeypatch.setattr(run_agent, "get_hermes_home", lambda: tmp_path)
-    agent = SimpleNamespace()
+    agent = _build_agent(monkeypatch)
     method = run_agent.AIAgent._persist_codex_image_generation_artifacts
     assistant_message = SimpleNamespace(
         provider_data={
@@ -1993,3 +1993,66 @@ def test_persist_codex_image_generation_artifacts_writes_media_file(monkeypatch,
     assert "result" not in sanitized
     assert sanitized["output_path"] == media_paths[0]
     assert sanitized["mime_type"] == "image/png"
+
+
+def test_persisted_codex_image_metadata_is_saved_by_build_assistant_message(monkeypatch, tmp_path):
+    monkeypatch.setattr(run_agent, "get_hermes_home", lambda: tmp_path)
+    agent = _build_agent(monkeypatch)
+    assistant_message = SimpleNamespace(
+        content="",
+        tool_calls=None,
+        reasoning=None,
+        provider_data={
+            "codex_image_generation_items": [
+                {
+                    "type": "image_generation_call",
+                    "id": "ig_trace",
+                    "status": "completed",
+                    "revised_prompt": "A robot avatar",
+                    "result": "aW1hZ2UtYnl0ZXM=",
+                }
+            ]
+        },
+    )
+
+    media_paths = agent._persist_codex_image_generation_artifacts(assistant_message)
+    assistant_message.content = "Generated image:\n" + "\n".join(f"MEDIA:{path}" for path in media_paths)
+    msg = agent._build_assistant_message(assistant_message, "stop")
+
+    assert media_paths
+    assert "codex_image_generation_items" in msg
+    persisted = msg["codex_image_generation_items"][0]
+    assert persisted["type"] == "image_generation_call"
+    assert persisted["id"] == "ig_trace"
+    assert persisted["output_path"] == media_paths[0]
+    assert persisted["mime_type"] == "image/png"
+    assert persisted["result_sha256"]
+    assert "result" not in persisted
+
+
+def test_build_assistant_message_reads_codex_metadata_from_provider_data(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    assistant = SimpleNamespace(
+        content="Native traces present.",
+        tool_calls=None,
+        reasoning=None,
+        provider_data={
+            "codex_web_search_items": [
+                {"type": "web_search_call", "id": "ws_123", "status": "completed"},
+            ],
+            "codex_image_generation_items": [
+                {
+                    "type": "image_generation_call",
+                    "id": "ig_123",
+                    "status": "completed",
+                    "output_path": "/tmp/codex_ig_123.png",
+                    "mime_type": "image/png",
+                },
+            ],
+        },
+    )
+
+    msg = agent._build_assistant_message(assistant, "stop")
+
+    assert msg["codex_web_search_items"] == assistant.provider_data["codex_web_search_items"]
+    assert msg["codex_image_generation_items"] == assistant.provider_data["codex_image_generation_items"]
