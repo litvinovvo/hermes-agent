@@ -560,6 +560,16 @@ DEFAULT_CONFIG = {
         "extract_backend": "",   # per-capability override for web_extract (e.g. "native")
     },
 
+    "codex": {
+        # Provider-native Responses tools for the OpenAI Codex backend.
+        # web_search: "disabled" | "cached" | "live"
+        "web_search": "disabled",
+        # image_generation: "disabled" | "enabled"
+        "image_generation": "disabled",
+    },
+
+    "provider_native_tools": {},
+
     "browser": {
         "inactivity_timeout": 120,
         "command_timeout": 30,  # Timeout for browser commands in seconds (screenshot, navigate, etc.)

@@ -180,6 +180,91 @@ class TestCodexBuildKwargs:
         # "minimal" should be clamped to "low" for xAI as well
         assert kw.get("reasoning", {}).get("effort") == "low"
 
+    def test_native_web_search_live_adds_hosted_responses_tool(self, transport):
+        from agent.provider_native_tools import NativeToolSpec
+
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            native_tools=[
+                NativeToolSpec(
+                    logical_name="web_search",
+                    provider_tool_type="web_search",
+                    mode="live",
+                    suppress_managed_tools=("web_search",),
+                    include=("web_search_call.action.sources",),
+                )
+            ],
+        )
+
+        assert {"type": "web_search", "external_web_access": True} in kw["tools"]
+        assert "web_search_call.action.sources" in kw["include"]
+
+    def test_native_web_search_cached_adds_hosted_responses_tool(self, transport):
+        from agent.provider_native_tools import NativeToolSpec
+
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            native_tools=[
+                NativeToolSpec(
+                    logical_name="web_search",
+                    provider_tool_type="web_search",
+                    mode="cached",
+                    suppress_managed_tools=("web_search",),
+                )
+            ],
+        )
+
+        assert {"type": "web_search", "external_web_access": False} in kw["tools"]
+
+    def test_native_web_search_merges_include_without_duplicates(self, transport):
+        from agent.provider_native_tools import NativeToolSpec
+
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            native_tools=[
+                NativeToolSpec(
+                    logical_name="web_search",
+                    provider_tool_type="web_search",
+                    mode="live",
+                    suppress_managed_tools=("web_search",),
+                    include=("web_search_call.action.sources",),
+                )
+            ],
+            request_overrides={"include": ["reasoning.encrypted_content", "web_search_call.action.sources"]},
+        )
+
+        assert kw["include"].count("web_search_call.action.sources") == 1
+        assert kw["include"] == ["reasoning.encrypted_content", "web_search_call.action.sources"]
+
+    def test_native_image_generation_adds_hosted_responses_tool(self, transport):
+        from agent.provider_native_tools import NativeToolSpec
+
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            native_tools=[
+                NativeToolSpec(
+                    logical_name="image_generate",
+                    provider_tool_type="image_generation",
+                    mode="enabled",
+                    suppress_managed_tools=("image_generate",),
+                )
+            ],
+        )
+
+        assert {"type": "image_generation"} in kw["tools"]
+
 
 class TestCodexValidateResponse:
 
@@ -266,6 +351,41 @@ class TestCodexNormalizeResponse:
                 "content": [{"type": "output_text", "text": "Hello world"}],
                 "id": "msg_abc",
                 "phase": "final_answer",
+            }
+        ]
+
+    def test_image_generation_items_preserved_in_provider_data(self, transport):
+        r = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="image_generation_call",
+                    id="ig_abc",
+                    status="completed",
+                    revised_prompt="A small cat",
+                    result="aW1hZ2UtYnl0ZXM=",
+                ),
+                SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    content=[SimpleNamespace(type="output_text", text="Generated it.")],
+                    status="completed",
+                ),
+            ],
+            status="completed",
+            incomplete_details=None,
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5,
+                                  input_tokens_details=None, output_tokens_details=None),
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.codex_image_generation_items == [
+            {
+                "type": "image_generation_call",
+                "id": "ig_abc",
+                "status": "completed",
+                "revised_prompt": "A small cat",
+                "result": "aW1hZ2UtYnl0ZXM=",
             }
         ]
 

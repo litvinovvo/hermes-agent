@@ -1371,6 +1371,7 @@ class AIAgent:
         self.reasoning_config = reasoning_config  # None = use default (medium for OpenRouter)
         self.service_tier = service_tier
         self.request_overrides = dict(request_overrides or {})
+        self._provider_native_tools = []
         self.prefill_messages = prefill_messages or []  # Prefilled conversation turns
         self._force_ascii_payload = False
         
@@ -1868,6 +1869,18 @@ class AIAgent:
             _agent_cfg = _load_agent_config()
         except Exception:
             _agent_cfg = {}
+        try:
+            from agent.provider_native_tools import resolve_provider_native_tools
+
+            self._provider_native_tools = resolve_provider_native_tools(
+                _agent_cfg,
+                provider=self.provider,
+                api_mode=self.api_mode,
+                base_url=self.base_url,
+            )
+        except Exception as _pnt_err:
+            logger.debug("Provider-native tool config ignored: %s", _pnt_err)
+            self._provider_native_tools = []
         try:
             self._tool_guardrails = ToolCallGuardrailController(
                 ToolCallGuardrailConfig.from_mapping(
@@ -9256,10 +9269,17 @@ class AIAgent:
             )
             is_xai_responses = self.provider == "xai" or self._base_url_hostname == "api.x.ai"
             _msgs_for_codex = self._prepare_messages_for_non_vision_model(api_messages)
+            native_tools = list(getattr(self, "_provider_native_tools", []) or []) if is_codex_backend else []
+            tools_for_codex = self.tools
+            if native_tools:
+                from agent.provider_native_tools import filter_managed_tools_for_native_tools
+
+                tools_for_codex = filter_managed_tools_for_native_tools(self.tools, native_tools)
             return _ct.build_kwargs(
                 model=self.model,
                 messages=_msgs_for_codex,
-                tools=self.tools,
+                tools=tools_for_codex,
+                native_tools=native_tools,
                 reasoning_config=self.reasoning_config,
                 session_id=getattr(self, "session_id", None),
                 max_tokens=self.max_tokens,
@@ -9538,6 +9558,77 @@ class AIAgent:
 
         return {"effort": requested_effort}
 
+    def _persist_codex_image_generation_artifacts(self, assistant_message) -> list[str]:
+        """Decode Codex native image_generation_call results into MEDIA files.
+
+        The Responses API returns generated images as base64 strings on
+        `image_generation_call.result`. Store them as files under Hermes cache and
+        replace the raw base64 in provider metadata with lightweight artifact
+        paths before session persistence.
+        """
+
+        items = getattr(assistant_message, "codex_image_generation_items", None)
+        if not isinstance(items, list) or not items:
+            provider_data = getattr(assistant_message, "provider_data", None)
+            if isinstance(provider_data, dict):
+                items = provider_data.get("codex_image_generation_items")
+        if not isinstance(items, list) or not items:
+            return []
+
+        images_dir = get_hermes_home() / "cache" / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        media_paths: list[str] = []
+        sanitized_items: list[dict[str, Any]] = []
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            sanitized = {key: value for key, value in item.items() if key != "result"}
+            raw_result = item.get("result")
+            if not isinstance(raw_result, str) or not raw_result.strip():
+                sanitized_items.append(sanitized)
+                continue
+
+            encoded = raw_result.strip()
+            if encoded.startswith("data:") and "," in encoded:
+                encoded = encoded.split(",", 1)[1]
+            try:
+                image_bytes = base64.b64decode(encoded, validate=True)
+            except Exception:
+                logger.warning("Skipping invalid Codex image_generation result", exc_info=True)
+                sanitized_items.append(sanitized)
+                continue
+            if not image_bytes:
+                sanitized_items.append(sanitized)
+                continue
+
+            item_id = str(item.get("id") or f"image_{idx}")
+            safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", item_id).strip("._") or f"image_{idx}"
+            digest = hashlib.sha256(image_bytes).hexdigest()[:12]
+            output_path = images_dir / f"codex_{safe_id}_{digest}.png"
+            try:
+                output_path.write_bytes(image_bytes)
+            except Exception:
+                logger.warning("Failed to write Codex image_generation artifact", exc_info=True)
+                sanitized_items.append(sanitized)
+                continue
+
+            sanitized["output_path"] = str(output_path)
+            sanitized["result_sha256"] = hashlib.sha256(image_bytes).hexdigest()
+            sanitized["mime_type"] = "image/png"
+            sanitized_items.append(sanitized)
+            media_paths.append(str(output_path))
+
+        provider_data = getattr(assistant_message, "provider_data", None)
+        if isinstance(provider_data, dict):
+            provider_data["codex_image_generation_items"] = sanitized_items or None
+        elif hasattr(assistant_message, "codex_image_generation_items"):
+            try:
+                assistant_message.codex_image_generation_items = sanitized_items or None
+            except Exception:
+                pass
+        return media_paths
+
     def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:
         """Build a normalized assistant message dict from an API response message.
 
@@ -9679,6 +9770,14 @@ class AIAgent:
         codex_message_items = getattr(assistant_message, "codex_message_items", None)
         if codex_message_items:
             msg["codex_message_items"] = codex_message_items
+
+        # Codex Responses API: preserve image-generation artifact metadata after
+        # the base64 payload has been decoded to MEDIA files. The raw result is
+        # intentionally stripped by _persist_codex_image_generation_artifacts()
+        # before this message is persisted so session history does not balloon.
+        codex_image_generation_items = getattr(assistant_message, "codex_image_generation_items", None)
+        if codex_image_generation_items:
+            msg["codex_image_generation_items"] = codex_image_generation_items
 
         if assistant_tool_calls:
             tool_calls = []
@@ -14561,6 +14660,13 @@ class AIAgent:
                 else:
                     # No tool calls - this is the final response
                     final_response = assistant_message.content or ""
+                    codex_image_media_paths = self._persist_codex_image_generation_artifacts(assistant_message)
+                    if codex_image_media_paths:
+                        media_lines = [f"MEDIA:{path}" for path in codex_image_media_paths]
+                        if self._has_content_after_think_block(final_response):
+                            final_response = final_response.rstrip() + "\n\n" + "\n".join(media_lines)
+                        else:
+                            final_response = "Generated image:" + "\n" + "\n".join(media_lines)
                     
                     # Fix: unmute output when entering the no-tool-call branch
                     # so the user can see empty-response warnings and recovery
@@ -14865,6 +14971,11 @@ class AIAgent:
                         length_continue_retries = 0
                     
                     final_response = self._strip_think_blocks(final_response).strip()
+                    if codex_image_media_paths:
+                        try:
+                            assistant_message.content = final_response
+                        except Exception:
+                            pass
                     
                     final_msg = self._build_assistant_message(assistant_message, finish_reason)
 
