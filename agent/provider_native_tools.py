@@ -68,6 +68,17 @@ _FRESHNESS_PATTERN = re.compile(
 )
 
 
+_IMAGE_GENERATION_PATTERN = re.compile(
+    r"\b("
+    r"generate|create|draw|make|render|paint|illustrate|image|picture|avatar|logo|"
+    r"photo|poster|icon|wallpaper|sticker|"
+    r"сгенерируй|создай|нарисуй|сделай|картинк|изображен|аватар|логотип|"
+    r"фото|постер|иконк|обо[ий]|стикер"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
 def _message_content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -95,6 +106,10 @@ def is_freshness_sensitive_request(messages: Sequence[Mapping[str, Any]] | None)
     return bool(_FRESHNESS_PATTERN.search(latest_user_text(messages)))
 
 
+def is_image_generation_request(messages: Sequence[Mapping[str, Any]] | None) -> bool:
+    return bool(_IMAGE_GENERATION_PATTERN.search(latest_user_text(messages)))
+
+
 def codex_native_tool_choice_for_request(
     native_tools: Sequence[NativeToolSpec] | None,
     messages: Sequence[Mapping[str, Any]] | None,
@@ -108,6 +123,18 @@ def codex_native_tool_choice_for_request(
     the hosted web_search tool only for requests that look freshness-sensitive;
     ``required`` forces it for every request, and ``none`` disables forcing.
     """
+
+    for spec in native_tools or ():
+        if spec.provider_tool_type != "image_generation":
+            continue
+        if spec.tool_choice == "none":
+            continue
+        if spec.tool_choice == "required" or is_image_generation_request(messages):
+            return {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "image_generation"}],
+            }
 
     for spec in native_tools or ():
         if spec.provider_tool_type != "web_search":
@@ -191,6 +218,9 @@ def resolve_provider_native_tools(
         codex_cfg.get("image_generation", codex_cfg.get("image_generate")),
     )
     image_generation_mode = _normalize_mode(image_generation_value)
+    image_generation_tool_choice = _normalize_tool_choice_mode(
+        generic_cfg.get("image_generation_tool_choice", codex_cfg.get("image_generation_tool_choice"))
+    )
     if image_generation_mode == "live":
         image_generation_mode = "enabled"
     if image_generation_mode == "enabled":
@@ -200,6 +230,7 @@ def resolve_provider_native_tools(
                 provider_tool_type="image_generation",
                 mode="enabled",
                 suppress_managed_tools=("image_generate",),
+                tool_choice=image_generation_tool_choice,
             )
         )
 

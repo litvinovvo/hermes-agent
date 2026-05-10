@@ -312,6 +312,30 @@ class TestCodexBuildKwargs:
         assert {"type": "image_generation"} in kw["tools"]
 
 
+    def test_native_image_generation_forces_tool_choice_for_image_prompt(self, transport):
+        from agent.provider_native_tools import NativeToolSpec
+
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "Generate a blue square image"}],
+            tools=[],
+            native_tools=[
+                NativeToolSpec(
+                    logical_name="image_generate",
+                    provider_tool_type="image_generation",
+                    mode="enabled",
+                    suppress_managed_tools=("image_generate",),
+                    tool_choice="auto",
+                )
+            ],
+        )
+
+        assert kw["tool_choice"] == {
+            "type": "allowed_tools",
+            "mode": "required",
+            "tools": [{"type": "image_generation"}],
+        }
+
 class TestCodexValidateResponse:
 
     def test_none_response(self, transport):
