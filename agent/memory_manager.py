@@ -46,7 +46,7 @@ _INTERNAL_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 _INTERNAL_NOTE_RE = re.compile(
-    r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*',
+    r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.[^\]]*\]\s*',
     re.IGNORECASE,
 )
 
@@ -171,7 +171,14 @@ class StreamingContextScrubber:
 
 
 def build_memory_context_block(raw_context: str) -> str:
-    """Wrap prefetched memory in a fenced block with system note."""
+    """Wrap prefetched provider memory in a fenced block with system note.
+
+    Provider recall (Honcho, Mem0, etc.) is intentionally framed as an
+    auxiliary recall/hypothesis layer.  The curated file-backed memory blocks
+    (USER.md / MEMORY.md) and loaded SKILL.md files are injected separately and
+    remain the higher-priority source of truth for stable preferences, durable
+    environment facts, and workflows.
+    """
     if not raw_context or not raw_context.strip():
         return ""
     clean = sanitize_context(raw_context)
@@ -180,8 +187,12 @@ def build_memory_context_block(raw_context: str) -> str:
     return (
         "<memory-context>\n"
         "[System note: The following is recalled memory context, "
-        "NOT new user input. Treat as authoritative reference data — "
-        "this is the agent's persistent memory and should inform all responses.]\n\n"
+        "NOT new user input. Treat it as auxiliary recall/hypothesis context, "
+        "not as the primary source of truth. Prefer curated USER.md/MEMORY.md "
+        "and loaded SKILL.md instructions for stable preferences, environment "
+        "facts, and workflows; use this provider context mainly for semantic "
+        "recall of past sessions, and disregard it when stale, noisy, or "
+        "conflicting.]\n\n"
         f"{clean}\n"
         "</memory-context>"
     )

@@ -8,6 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 
+async def _run_to_thread_inline(func, /, *args, **kwargs):
+    """Test helper: run to_thread call sites inline to avoid executor teardown waits."""
+    return func(*args, **kwargs)
+
+
 class DummyResponse:
     def __init__(self, status_code=200, payload=None, headers=None, text=None):
         self.status_code = status_code
@@ -278,8 +283,10 @@ def test_native_client_rejects_empty_api_key_with_actionable_message():
 
 
 @pytest.mark.asyncio
-async def test_async_native_client_streams_without_requiring_async_iterator_from_sync_client():
+async def test_async_native_client_streams_without_requiring_async_iterator_from_sync_client(monkeypatch):
     from agent.gemini_native_adapter import AsyncGeminiNativeClient
+
+    monkeypatch.setattr("agent.gemini_native_adapter.asyncio.to_thread", _run_to_thread_inline)
 
     chunk = SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="hi"), finish_reason=None)])
     sync_stream = iter([chunk])

@@ -526,7 +526,9 @@ class HonchoMemoryProvider(MemoryProvider):
                 "# Honcho Memory\n"
                 "Active (context-injection mode). Relevant user context is automatically "
                 "injected before each turn. No memory tools are available — context is "
-                "managed automatically."
+                "managed automatically. Treat Honcho as an auxiliary recall/hypothesis "
+                "layer: curated USER.md/MEMORY.md and loaded SKILL.md instructions take "
+                "priority for stable preferences, environment facts, and workflows."
             )
         elif self._recall_mode == "tools":
             header = (
@@ -536,7 +538,9 @@ class HonchoMemoryProvider(MemoryProvider):
                 "honcho_reasoning for synthesized answers (pass reasoning_level "
                 "minimal/low/medium/high/max — you pick the depth per call), "
                 "honcho_conclude to save facts about the user. "
-                "No automatic context injection — you must use tools to access memory."
+                "No automatic context injection — you must use tools to access memory. "
+                "Treat Honcho as recall/hypothesis context; curated USER.md/MEMORY.md "
+                "and SKILL.md remain the sources of truth."
             )
         else:  # hybrid
             header = (
@@ -546,7 +550,10 @@ class HonchoMemoryProvider(MemoryProvider):
                 "honcho_search for raw excerpts, honcho_context for raw peer context, "
                 "honcho_reasoning for synthesized answers (pass reasoning_level "
                 "minimal/low/medium/high/max — you pick the depth per call), "
-                "honcho_conclude to save facts about the user."
+                "honcho_conclude to save facts about the user. Treat Honcho as an "
+                "auxiliary recall/hypothesis layer: curated USER.md/MEMORY.md and "
+                "loaded SKILL.md instructions take priority for stable preferences, "
+                "environment facts, and workflows."
             )
 
         return header

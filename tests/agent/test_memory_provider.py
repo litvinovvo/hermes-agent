@@ -772,6 +772,11 @@ class TestMemoryContextFencing:
         assert result.startswith("<memory-context>")
         assert result.rstrip().endswith("</memory-context>")
         assert "NOT new user input" in result
+        assert "auxiliary recall/hypothesis context" in result
+        assert "primary source of truth" in result
+        assert "USER.md/MEMORY.md" in result
+        assert "SKILL.md" in result
+        assert "authoritative reference data" not in result
         assert "user likes dark mode" in result
 
     def test_build_memory_context_block_empty_input(self):

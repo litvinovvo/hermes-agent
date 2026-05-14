@@ -524,15 +524,19 @@ MEMORY_SCHEMA = {
         "- You discover something about the environment (OS, installed tools, project structure)\n"
         "- You learn a convention, API quirk, or workflow specific to this user's setup\n"
         "- You identify a stable fact that will be useful again in future sessions\n\n"
-        "PRIORITY: User preferences and corrections > environment facts > procedural knowledge. "
+        "PRIORITY AND STORAGE MODEL:\n"
+        "- USER.md / target='user' is the main curated source for short, stable user preferences.\n"
+        "- MEMORY.md / target='memory' is the main curated source for stable environment/project facts.\n"
+        "- SKILL.md files are the main source for procedures, workflows, style/format rules, and reusable how-to knowledge.\n"
+        "- External memory providers such as Honcho are recall/search/hypothesis layers, not the primary source of truth.\n"
         "The most valuable memory prevents the user from having to repeat themselves.\n\n"
         "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
-        "state to memory; use session_search to recall those from past transcripts.\n"
+        "state to memory; use session_search or provider recall to retrieve those from past transcripts.\n"
         "If you've discovered a new way to do something, solved a problem that could be "
         "necessary later, save it as a skill with the skill tool.\n\n"
         "TWO TARGETS:\n"
-        "- 'user': who the user is -- name, role, preferences, communication style, pet peeves\n"
-        "- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\n"
+        "- 'user': short stable user preferences, identity/profile facts, communication style, pet peeves\n"
+        "- 'memory': stable environment facts, project locations, installed tools, conventions, tool quirks\n\n"
         "ACTIONS: add (new entry), replace (update existing -- old_text identifies it), "
         "remove (delete -- old_text identifies it).\n\n"
         "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
@@ -548,7 +552,7 @@ MEMORY_SCHEMA = {
             "target": {
                 "type": "string",
                 "enum": ["memory", "user"],
-                "description": "Which memory store: 'memory' for personal notes, 'user' for user profile."
+                "description": "Which curated file store: 'memory' for stable environment/project facts, 'user' for short stable user preferences/profile facts."
             },
             "content": {
                 "type": "string",

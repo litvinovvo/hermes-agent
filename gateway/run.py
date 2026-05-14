@@ -7426,6 +7426,20 @@ class GatewayRunner:
                                     if _hyg_new_sid != session_entry.session_id:
                                         session_entry.session_id = _hyg_new_sid
                                         self.session_store._save()
+                                        # Telegram DM topic lanes keep a separate
+                                        # topic -> session_id binding in SQLite.
+                                        # Compression rotates the live session_id;
+                                        # keep that binding in lockstep so the next
+                                        # inbound message does not switch back to
+                                        # the pre-compression parent session.
+                                        try:
+                                            if self._is_telegram_topic_lane(source):
+                                                self._record_telegram_topic_binding(source, session_entry)
+                                        except Exception:
+                                            logger.debug(
+                                                "Failed to update Telegram topic binding after hygiene compression",
+                                                exc_info=True,
+                                            )
 
                                     self.session_store.rewrite_transcript(
                                         session_entry.session_id, _compressed
@@ -7687,6 +7701,14 @@ class GatewayRunner:
             # session_entry so transcript writes below go to the right session.
             if agent_result.get("session_id") and agent_result["session_id"] != session_entry.session_id:
                 session_entry.session_id = agent_result["session_id"]
+                try:
+                    if self._is_telegram_topic_lane(source):
+                        self._record_telegram_topic_binding(source, session_entry)
+                except Exception:
+                    logger.debug(
+                        "Failed to update Telegram topic binding after agent session switch",
+                        exc_info=True,
+                    )
 
             # Prepend reasoning/thinking if display is enabled (per-platform)
             try:
@@ -15800,6 +15822,14 @@ class GatewayRunner:
                 if entry:
                     entry.session_id = agent.session_id
                     self.session_store._save()
+                    try:
+                        if self._is_telegram_topic_lane(source):
+                            self._record_telegram_topic_binding(source, entry)
+                    except Exception:
+                        logger.debug(
+                            "Failed to update Telegram topic binding after run-time compression split",
+                            exc_info=True,
+                        )
 
             effective_session_id = getattr(agent, 'session_id', session_id) if agent else session_id
 

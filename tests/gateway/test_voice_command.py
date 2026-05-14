@@ -84,6 +84,11 @@ def _make_runner(tmp_path):
     return runner
 
 
+async def _run_to_thread_inline(func, /, *args, **kwargs):
+    """Test helper: run to_thread call sites inline to avoid executor teardown waits."""
+    return func(*args, **kwargs)
+
+
 # =====================================================================
 # /voice command handler
 # =====================================================================
@@ -421,18 +426,19 @@ class TestAutoVoiceReply:
         adapter.platform = SimpleNamespace(value="test")
         llm_response = SimpleNamespace(
             choices=[SimpleNamespace(
-                message=SimpleNamespace(content="Коротко: голос теперь говорит итог и важный следующий шаг, а детали остаются в тексте.")
+                message=SimpleNamespace(content="Briefly: the voice note now says the result and the important next step, while details stay in chat.")
             )]
         )
 
         with patch("hermes_cli.config.load_config", return_value={
                 "tts": {"speech_adaptation": {"enabled": True, "max_input_chars": 300}}
              }), \
+             patch("gateway.platforms.base.asyncio.to_thread", side_effect=_run_to_thread_inline), \
              patch("agent.auxiliary_client.call_llm", return_value=llm_response) as mock_call_llm, \
              patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t):
             adapted = await adapter._adapt_voice_input_auto_tts_text(
-                visible_reply="Готово. Подробности: `python3 -m pytest ...` и длинный список файлов.",
-                fallback_tts_text="Готово. Подробности: python3 -m pytest и длинный список файлов.",
+                visible_reply="Done. Details: `python3 -m pytest ...` and a long file list.",
+                fallback_tts_text="Done. Details: python3 -m pytest and a long file list.",
             )
 
         mock_call_llm.assert_called_once()
@@ -440,7 +446,7 @@ class TestAutoVoiceReply:
         assert "concise speech-only summaries" in system_prompt
         assert "compact voice summary" in system_prompt
         assert "not a hard length limit" in system_prompt
-        assert adapted == "Коротко: голос теперь говорит итог и важный следующий шаг, а детали остаются в тексте."
+        assert adapted == "Briefly: the voice note now says the result and the important next step, while details stay in chat."
 
 
 # =====================================================================
@@ -462,7 +468,8 @@ class TestSendVoiceReply:
 
         tts_result = json.dumps({"success": True, "file_path": "/tmp/test.ogg"})
 
-        with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
+        with patch("gateway.run.asyncio.to_thread", side_effect=_run_to_thread_inline), \
+             patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
              patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
              patch("os.path.isfile", return_value=True), \
              patch("os.unlink"), \
@@ -488,7 +495,8 @@ class TestSendVoiceReply:
 
         tts_result = json.dumps({"success": True, "file_path": "/tmp/test.ogg"})
 
-        with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
+        with patch("gateway.run.asyncio.to_thread", side_effect=_run_to_thread_inline), \
+             patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
              patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
              patch("os.path.isfile", return_value=True), \
              patch("os.unlink"), \
@@ -518,18 +526,19 @@ class TestSendVoiceReply:
             captured.append(text)
             return json.dumps({"success": True, "file_path": "/tmp/test.ogg"})
 
-        with patch("tools.tts_tool.text_to_speech_tool", side_effect=fake_tts), \
+        with patch("gateway.run.asyncio.to_thread", side_effect=_run_to_thread_inline), \
+             patch("tools.tts_tool.text_to_speech_tool", side_effect=fake_tts), \
              patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
              patch("os.path.isfile", return_value=True), \
              patch("os.unlink"), \
              patch("os.makedirs"):
             await runner._send_voice_reply(
                 event,
-                f"Привет! Чем займёмся?\n\n{footer}",
+                f"Hi. What should we work on?\n\n{footer}",
                 footer_line=footer,
             )
 
-        assert captured == ["Привет! Чем займёмся?"]
+        assert captured == ["Hi. What should we work on?"]
         mock_adapter.send_voice.assert_called_once()
 
     @pytest.mark.asyncio
@@ -546,21 +555,22 @@ class TestSendVoiceReply:
             return json.dumps({"success": True, "file_path": "/tmp/test.ogg"})
 
         response = """
-Готово — поправил подсчёт токенов в секунду.
+Done - fixed the tokens-per-second calculation.
 
-Команды:
+Commands:
 ```bash
 python3 -m pytest tests/gateway/test_runtime_footer.py -q
 ```
 
-Файлы:
-- `/home/pc_lion/.hermes/hermes-agent/run_agent.py`
-- `/home/pc_lion/.hermes/hermes-agent/gateway/run.py`
+Files:
+- `/workspace/hermes-agent/run_agent.py`
+- `/workspace/hermes-agent/gateway/run.py`
 
-Итог: теперь метрика считает только LLM-сервис, а не весь gateway turn.
+Result: the metric now counts only the LLM service time, not the whole gateway turn.
 """
 
-        with patch("tools.tts_tool.text_to_speech_tool", side_effect=fake_tts), \
+        with patch("gateway.run.asyncio.to_thread", side_effect=_run_to_thread_inline), \
+             patch("tools.tts_tool.text_to_speech_tool", side_effect=fake_tts), \
              patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
              patch("os.path.isfile", return_value=True), \
              patch("os.unlink"), \
@@ -568,11 +578,11 @@ python3 -m pytest tests/gateway/test_runtime_footer.py -q
             await runner._send_voice_reply(event, response)
 
         assert captured == [
-            "Готово — поправил подсчёт токенов в секунду. "
-            "Итог: теперь метрика считает только LLM-сервис, а не весь gateway turn."
+            "Done - fixed the tokens-per-second calculation. "
+            "Result: the metric now counts only the LLM service time, not the whole gateway turn."
         ]
         assert "python3" not in captured[0]
-        assert "/home/pc_lion" not in captured[0]
+        assert "/workspace/hermes-agent" not in captured[0]
         mock_adapter.send_voice.assert_called_once()
 
     @pytest.mark.asyncio
@@ -591,12 +601,13 @@ python3 -m pytest tests/gateway/test_runtime_footer.py -q
         llm_response = SimpleNamespace(
             choices=[SimpleNamespace(
                 message=SimpleNamespace(
-                    content="Готово, я включил отдельную голосовую версию ответа: теперь она будет звучать как нормальная речь, а не как текст с вырезанным кодом."
+                    content="Done, I enabled a separate voice version of the reply: it now sounds like natural speech instead of text with code removed."
                 )
             )]
         )
 
-        with patch("gateway.run._load_gateway_config", return_value={
+        with patch("gateway.run.asyncio.to_thread", side_effect=_run_to_thread_inline), \
+             patch("gateway.run._load_gateway_config", return_value={
                 "tts": {"speech_adaptation": {"enabled": True, "max_output_chars": 400}}
              }), \
              patch("agent.auxiliary_client.call_llm", return_value=llm_response) as mock_call_llm, \
@@ -607,7 +618,7 @@ python3 -m pytest tests/gateway/test_runtime_footer.py -q
              patch("os.makedirs"):
             await runner._send_voice_reply(
                 event,
-                "Готово.\nКод: `python3 -m pytest`.\nФайл: `/tmp/x.py`.",
+                "Done.\nCode: `python3 -m pytest`.\nFile: `/tmp/x.py`.",
             )
 
         mock_call_llm.assert_called_once()
@@ -617,7 +628,7 @@ python3 -m pytest tests/gateway/test_runtime_footer.py -q
         assert "not a hard length limit" in system_prompt
         assert "full adapted retelling" in system_prompt
         assert captured == [
-            "Готово, я включил отдельную голосовую версию ответа: теперь она будет звучать как нормальная речь, а не как текст с вырезанным кодом."
+            "Done, I enabled a separate voice version of the reply: it now sounds like natural speech instead of text with code removed."
         ]
         assert "python3" not in captured[0]
         assert "/tmp/x.py" not in captured[0]
@@ -640,14 +651,15 @@ python3 -m pytest tests/gateway/test_runtime_footer.py -q
             choices=[SimpleNamespace(
                 message=SimpleNamespace(
                     content=(
-                        "Первая фраза уже закончена. "
-                        "Вторая фраза специально длинная и не должна попадать в голос как обрубок"
+                        "The first sentence is already complete. "
+                        "The second sentence is deliberately long and must not be spoken as a chopped fragment"
                     )
                 )
             )]
         )
 
-        with patch("gateway.run._load_gateway_config", return_value={
+        with patch("gateway.run.asyncio.to_thread", side_effect=_run_to_thread_inline), \
+             patch("gateway.run._load_gateway_config", return_value={
                 "tts": {"speech_adaptation": {"enabled": True, "max_output_chars": 45}}
              }), \
              patch("agent.auxiliary_client.call_llm", return_value=llm_response), \
@@ -656,11 +668,11 @@ python3 -m pytest tests/gateway/test_runtime_footer.py -q
              patch("os.path.isfile", return_value=True), \
              patch("os.unlink"), \
              patch("os.makedirs"):
-            await runner._send_voice_reply(event, "Видимый ответ.")
+            await runner._send_voice_reply(event, "Visible reply.")
 
         assert captured == [
-            "Первая фраза уже закончена. "
-            "Вторая фраза специально длинная и не должна попадать в голос как обрубок"
+            "The first sentence is already complete. "
+            "The second sentence is deliberately long and must not be spoken as a chopped fragment"
         ]
         mock_adapter.send_voice.assert_called_once()
 
@@ -688,12 +700,13 @@ python3 -m pytest tests/gateway/test_runtime_footer.py -q
             return json.dumps({"success": True, "file_path": next(paths)})
 
         sentence = (
-            "Это достаточно подробное предложение про причину сбоя и автогенерацию голоса, "
-            "которое должно оставаться читаемым в отдельном голосовом сообщении. "
+            "This is a detailed sentence about the failure cause and automatic voice generation, "
+            "and it should remain readable as a separate voice message. "
         )
         long_reply = sentence * 8
 
-        with patch("tools.tts_tool.text_to_speech_tool", side_effect=fake_tts) as mock_tts, \
+        with patch("gateway.run.asyncio.to_thread", side_effect=_run_to_thread_inline), \
+             patch("tools.tts_tool.text_to_speech_tool", side_effect=fake_tts) as mock_tts, \
              patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
              patch("os.path.isfile", return_value=True), \
              patch("os.unlink"), \
@@ -710,7 +723,8 @@ python3 -m pytest tests/gateway/test_runtime_footer.py -q
         runner.adapters[event.source.platform] = mock_adapter
         tts_result = json.dumps({"success": False, "error": "API error"})
 
-        with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
+        with patch("gateway.run.asyncio.to_thread", side_effect=_run_to_thread_inline), \
+             patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
              patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
              patch("os.path.isfile", return_value=False), \
              patch("os.makedirs"):
@@ -721,7 +735,8 @@ python3 -m pytest tests/gateway/test_runtime_footer.py -q
     @pytest.mark.asyncio
     async def test_exception_caught(self, runner):
         event = _make_event()
-        with patch("tools.tts_tool.text_to_speech_tool", side_effect=RuntimeError("boom")), \
+        with patch("gateway.run.asyncio.to_thread", side_effect=_run_to_thread_inline), \
+             patch("tools.tts_tool.text_to_speech_tool", side_effect=RuntimeError("boom")), \
              patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
              patch("os.makedirs"):
             # Should not raise
@@ -1434,6 +1449,7 @@ class TestDiscordVoiceChannelMethods:
         pcm_data = b"\x00" * 96000
 
         with patch("gateway.platforms.discord.VoiceReceiver.pcm_to_wav"), \
+             patch("gateway.platforms.discord.asyncio.to_thread", side_effect=_run_to_thread_inline), \
              patch("tools.transcription_tools.transcribe_audio",
                    return_value={"success": True, "transcript": "Hello"}), \
              patch("tools.voice_mode.is_whisper_hallucination", return_value=False):
@@ -1449,6 +1465,7 @@ class TestDiscordVoiceChannelMethods:
         adapter._voice_input_callback = callback
 
         with patch("gateway.platforms.discord.VoiceReceiver.pcm_to_wav"), \
+             patch("gateway.platforms.discord.asyncio.to_thread", side_effect=_run_to_thread_inline), \
              patch("tools.transcription_tools.transcribe_audio",
                    return_value={"success": True, "transcript": "Thank you."}), \
              patch("tools.voice_mode.is_whisper_hallucination", return_value=True):
@@ -1464,6 +1481,7 @@ class TestDiscordVoiceChannelMethods:
         adapter._voice_input_callback = callback
 
         with patch("gateway.platforms.discord.VoiceReceiver.pcm_to_wav"), \
+             patch("gateway.platforms.discord.asyncio.to_thread", side_effect=_run_to_thread_inline), \
              patch("tools.transcription_tools.transcribe_audio",
                    return_value={"success": False, "error": "API error"}):
             await adapter._process_voice_input(111, 42, b"\x00" * 96000)
@@ -1477,7 +1495,8 @@ class TestDiscordVoiceChannelMethods:
         adapter._voice_input_callback = AsyncMock()
 
         with patch("gateway.platforms.discord.VoiceReceiver.pcm_to_wav",
-                   side_effect=RuntimeError("ffmpeg not found")):
+                   side_effect=RuntimeError("ffmpeg not found")), \
+             patch("gateway.platforms.discord.asyncio.to_thread", side_effect=_run_to_thread_inline):
             await adapter._process_voice_input(111, 42, b"\x00" * 96000)
         # Should not raise
 
