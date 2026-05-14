@@ -25,7 +25,10 @@ async def test_trailing_footer_preserves_source_thread_metadata():
     adapter.send.assert_awaited_once_with(
         "572506117",
         "gpt-5.5 · 26%",
-        metadata={"thread_id": "257392"},
+        metadata={
+            "thread_id": "257392",
+            "telegram_dm_topic_reply_fallback": True,
+        },
     )
 
 

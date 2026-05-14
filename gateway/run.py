@@ -10349,8 +10349,7 @@ class GatewayRunner:
         adapter = self.adapters.get(source.platform)
         if not adapter:
             return
-        thread_id = getattr(source, "thread_id", None)
-        metadata = {"thread_id": thread_id} if thread_id else None
+        metadata = self._thread_metadata_for_source(source)
         await adapter.send(source.chat_id, footer_line, metadata=metadata)
 
     async def _deliver_media_from_response(
